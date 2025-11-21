@@ -2,16 +2,6 @@
 #include <string>
 #include <vector>
 
-struct Node {
-    int id;
-    std::string name;
-    int eqIndex;                       // 对应 MNA 方程号（-1 为 GND）
-    std::vector<int> attachedElements; // elements 中的下标
-
-    Node(int i, const std::string& n)
-        : id(i), name(n), eqIndex(-1) {}
-};
-
 std::string ltrim(const std::string& s) {
     std::size_t pos = s.find_first_not_of(" \t\r\n");
     if (pos == std::string::npos) return "";
