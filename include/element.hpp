@@ -4,7 +4,8 @@
 #include <string>
 #include <memory>
 #include <Eigen/Dense>
-#include "circuit.hpp"
+
+class Circuit;
 
 class Element {
 protected:
@@ -119,18 +120,19 @@ class MosfetBase : public Element {
 protected:
     bool isP;       // false: NMOS, true: PMOS
     double Vth;     // 阈值（正数），NMOS: Vgs > Vth 打开；PMOS: Vsg > Vth 打开
-    double K;       // K (A/V^2)，越大越“强”
+    double K;
+    double lambda;
+    double Cj0;       // K (A/V^2)，越大越“强”
 
 public:
     MosfetBase(const std::string& n,
                int nd, int ng, int ns, int nb,
                bool isPchannel,
-               double Vth_ = 0.7,
-               double K_   = 1e-3)
+               double Vth_ , double K_, double lambda_, double Cj0_   )
         : Element(n, {nd, ng, ns, nb}),
           isP(isPchannel),
           Vth(Vth_),
-          K(K_) {}
+          K(K_) , lambda(lambda_), Cj0(Cj0_) {}
 
     void stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
                const Circuit& ckt,
@@ -140,12 +142,15 @@ public:
 
 class NMosElement : public MosfetBase {
 public:
-    NMosElement(const std::string& n, int nd, int ng, int ns, int nb)
-        : MosfetBase(n, nd, ng, ns, nb, false) {}
+    NMosElement(const std::string& n, int nd, int ng, int ns, int nb,
+        bool isPchannel, double Vth_ , double K_, double lambda_, double Cj0_)
+        : MosfetBase(n, nd, ng, ns, nb, false, Vth_, K_, lambda_, Cj0_) {}
 };
 
 class PMosElement : public MosfetBase {
 public:
-    PMosElement(const std::string& n, int nd, int ng, int ns, int nb)
-        : MosfetBase(n, nd, ng, ns, nb, true) {}
+    PMosElement(const std::string& n, int nd, int ng, int ns, int nb,
+        bool isPchannel, double Vth_ , double K_, double lambda_, double Cj0_)
+        : MosfetBase(n, nd, ng, ns, nb, true, Vth_, K_, lambda_, Cj0_) {}
 };
+

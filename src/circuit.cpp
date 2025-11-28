@@ -1,5 +1,6 @@
 #include "circuit.hpp"
 #include <iostream>
+#include <memory>
 
 int Circuit::getOrCreateNode(const std::string& name) {
     auto it = nodeNameToId.find(name);
@@ -124,27 +125,38 @@ void Circuit::addVoltageSource(const std::string& name,
     nodes[idm].attachedElements.push_back(idx);
 }
 
-void Circuit::addMosfet(const std::string& name,
-                        const std::string& nd,
-                        const std::string& ng,
-                        const std::string& ns,
-                        const std::string& nb,
-                        const std::string& model) {
+void Circuit::addMosfet(
+    const std::string& name, const std::string& nd, 
+    const std::string& ng, const std::string& ns,
+    const std::string& modelId, double W, double L
+) {
+    const MosModel* m = findMosModel(modelId);
+    if(!m) {
+        std::cerr << "Unknown MOS model: " << modelId << "\n";
+        return;
+    }
+
     int idd = getOrCreateNode(nd);
     int idg = getOrCreateNode(ng);
     int ids = getOrCreateNode(ns);
-    int idb = getOrCreateNode(nb);
+    int idb = getOrCreateNode("0");
+
+    double K = m->MU * m->COX * (W/L);
+    double Vth_mag = std::abs(m->VT);
+    double lambda = m->LAMBDA;
+    double CJo = m->CJO;
 
     std::shared_ptr<Element> e;
-    if (!model.empty()) {
-        char c = static_cast<char>(std::toupper(static_cast<unsigned char>(model[0])));
-        if (c == 'P')
-            e = std::make_shared<PMosElement>(name, idd, idg, ids, idb);
-        else
-            e = std::make_shared<NMosElement>(name, idd, idg, ids, idb);
+    if (m->isP) {
+        e = std::make_shared<PMosElement>(
+            name, idd, idg, ids, idb, Vth_mag, K, 
+            lambda, CJo
+        );
     } else {
-        // 默认 NMOS
-        e = std::make_shared<NMosElement>(name, idd, idg, ids, idb);
+        e = std::make_shared<NMosElement>(
+            name, idd, idg, ids, idb, Vth_mag, K, 
+            lambda, CJo
+        );
     }
 
     int idx = static_cast<int>(elements.size());

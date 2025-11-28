@@ -114,7 +114,7 @@ private:
 
     void parseDeviceStmt(const Statement& st);
     void parseDotCard (const Statement& st);
-    void parseTitle(const Statement& st);
+    void parseTitle(const Statement& st, bool& titleConsumed);
 
     // 器件
     void parseResistor     (const Statement& st);
@@ -130,6 +130,7 @@ private:
     void parseTranCard (const Statement& st);
     void parseAcCard   (const Statement& st);
     void parsePrintCard(const Statement& st);
+    void parseModelCard(const Statement& st);
 
 };
 

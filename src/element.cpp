@@ -1,4 +1,5 @@
 #include "element.hpp"
+#include "circuit.hpp"
 #include <iostream>
 
 // =============== 各元件 stamp 实现 ===============
