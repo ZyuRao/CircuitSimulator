@@ -83,8 +83,16 @@ static VectorXd dcSolveNewtonLU(const Circuit& ckt) {
             MatrixXd G = MatrixXd::Zero(N, N);
             VectorXd I = VectorXd::Zero(N);
 
+<<<<<<< HEAD
+=======
+            // 根据当前猜测解 x，构建线性化后的 G & I
+            AnalysisContext ctx;
+            ctx.type        = AnalysisType::DC;
+            ctx.sourceScale = scale;
+
+>>>>>>> 2edfa30d876afc48a5c4ddd7f6e3757c7a097b27
             for (const auto& e : ckt.elements) {
-                e->stamp(G, I, ckt, x, scale);
+                e->stamp(G, I, ckt, x, ctx);
             }
 
             VectorXd xNew = Solver::solveLinearSystemLU(G, I);
@@ -119,7 +127,18 @@ static VectorXd dcSolveNewtonGS(const Circuit& ckt) {
     const int    maxNewtonIters = 50;
     const double tol            = 1e-9;
 
+<<<<<<< HEAD
     x.setZero(N);
+=======
+    // 构建线性方程组 G * x = I
+    AnalysisContext ctx;
+    ctx.type        = AnalysisType::OP;
+    ctx.sourceScale = 1.0;
+
+    for (const auto& e : ckt.elements) {
+        e->stamp(G, I, ckt, x, ctx);
+    }
+>>>>>>> 2edfa30d876afc48a5c4ddd7f6e3757c7a097b27
 
     for (int step = 1; step <= rampSteps; ++step) {
         double scale = static_cast<double>(step) / rampSteps;

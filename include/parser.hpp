@@ -3,81 +3,8 @@
 #include <string>
 #include <vector>
 #include "circuit.hpp"
+#include "sim.hpp"
 
-enum class AnalysisType {
-    NONE,
-    OP,
-    DC,
-    AC,
-    TRAN
-};
-
-enum class AcSweepType {
-    LIN,
-    DEC,
-    OCT
-};
-
-enum class ProbeKind {
-    NodeVoltage,
-    DiffVoltage,
-    BranchCurrent
-};
-
-struct DCSweepConfig {
-    std::string sourceName;
-    double start = 0.0;
-    double stop = 0.0;
-    double step = 0.0;
-};
-
-struct TranConfig {
-    bool enabled = false;
-    double tstep = 0.0;
-    double tstop = 0.0;
-    double tstart = 0.0;
-};
-
-struct AcConfig {
-    bool enabled = false;
-    AcSweepType sweepType = AcSweepType::DEC;
-    int nPoints = 0;
-    double fstart = 0.0;
-    double fstop = 0.0;
-};
-
-struct ProbeSpec {
-    ProbeKind kind = ProbeKind::NodeVoltage;
-    std::string expr;
-
-    std::string node1;
-    std::string node2;
-
-    std::string eleName;
-};
-
-struct PrintCommand {
-    AnalysisType analysis = AnalysisType::NONE;
-    std::vector<ProbeSpec> probes;
-};
-
-class SimulationConfig {
-public:
-    bool doOp = false;
-    std::vector<DCSweepConfig> dcSweeps;
-    TranConfig tran;
-    AcConfig ac;
-    std::vector<PrintCommand> printCommands;
-
-
-    bool hasAnyAnalysis() const {
-        return doOp || !dcSweeps.empty() || tran.enabled || ac.enabled;
-    }
-
-    void ensureDefaultOp() {
-        doOp = !hasAnyAnalysis();
-    }
-};
 
 class NetlistParser {
 public:
