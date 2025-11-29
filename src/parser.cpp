@@ -249,7 +249,9 @@ void NetlistParser::parseInductor(const Statement& st) {
     }
     ckt.addInductor(t[0], t[1], t[2], val);
 }
+
 //支持：Vname np nm value / Vname np nm DC value
+<<<<<<< HEAD
 // 支持：
 //  Vname np nm value                （等价于 DC value）
 //  Vname np nm DC value
@@ -342,6 +344,89 @@ void NetlistParser::parseVoltageSource(const Statement& st) {
 <<<<<<< HEAD
     ckt.addVoltageSource(name, np, nm, dc);
 =======
+=======
+//新增支持：Vname np nm SIN v0 va freq [td [phi]]
+void NetlistParser::parseVoltageSource(const Statement& st) {
+    const auto& t = st.tokens;
+    if (t.size() < 4) {
+        std::cerr << "Line " << st.lineNo
+                  << ": invalid voltage source: " << st.raw << "\n";
+        return;
+    }
+
+    SourceSpec spec;
+    int idx = 3; // 当前要解析的 token 下标
+
+    // 解析 DC 部分（支持三种写法）:
+    //   Vname np nm value
+    //   Vname np nm DC value
+    //   Vname np nm SIN ...
+    try {
+        if (t.size() >= 5 && toLower(t[3]) == "dc") {
+            // V ... DC value [后面可再跟 SIN ...]
+            spec.dcValue = parseSpiceNumber(t[4]);
+            idx = 5;
+        } else {
+            std::string low3 = toLower(t[3]);
+            if (low3 == "sin") {
+                // V ... SIN v0 va freq [td [phi]]
+                spec.dcValue = 0.0;
+                idx = 3; // 让后面统一从 "SIN" 开始解析
+            } else {
+                // V ... <number> [可能后面再跟 SIN ...]
+                spec.dcValue = parseSpiceNumber(t[3]);
+                idx = 4;
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Line " << st.lineNo
+                  << ": cannot parse V DC value: " << e.what()
+                  << " in '" << st.raw << "'\n";
+        return;
+    }
+
+    // 小工具：解析 "SIN v0 va freq [td [phi]]"
+    auto parseSIN = [&](int sinIdx) {
+        if (toLower(t[sinIdx]) != "sin") return;
+
+        int need = sinIdx + 3; // 至少 SIN + 3 个参数
+        if (t.size() < (std::size_t)need + 1) {
+            std::cerr << "Line " << st.lineNo
+                      << ": SIN needs at least 3 parameters (v0 va freq): "
+                      << st.raw << "\n";
+            return;
+        }
+
+        SinSpec sin;
+        try {
+            sin.v0   = parseSpiceNumber(t[sinIdx + 1]);
+            sin.va   = parseSpiceNumber(t[sinIdx + 2]);
+            sin.freq = parseSpiceNumber(t[sinIdx + 3]);
+
+            if ((int)t.size() > sinIdx + 4) {
+                sin.td = parseSpiceNumber(t[sinIdx + 4]);
+            }
+            if ((int)t.size() > sinIdx + 5) {
+                sin.phi = parseSpiceNumber(t[sinIdx + 5]);
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Line " << st.lineNo
+                      << ": cannot parse SIN parameters: " << e.what()
+                      << " in '" << st.raw << "'\n";
+            return;
+        }
+
+        spec.tran.type = WaveformType::SIN;
+        spec.tran.sine = sin;
+    };
+
+    // 继续解析瞬态波形（只考虑 SIN）
+    if (idx < (int)t.size()) {
+        if (toLower(t[idx]) == "sin") {
+            parseSIN(idx);
+        }
+    }
+>>>>>>> master
 
     ckt.addVoltageSource(t[0], t[1], t[2], spec);
 >>>>>>> 2edfa30d876afc48a5c4ddd7f6e3757c7a097b27
@@ -611,17 +696,26 @@ void NetlistParser::parseModelCard(const Statement& st) {
                   << ": invalid .MODEL: " << st.raw << "\n";
         return;
     }
+<<<<<<< HEAD
 
     MosModel m;
     m.name = t[1];
 
     for (std::size_t i = 2; i + 1 < t.size(); i += 2) {
+=======
+
+    MosModel m;
+    m.name = t[1]; // 对应 .MODEL 1 / .MODEL 2 里的 "1" / "2"
+
+    for (size_t i = 2; i + 1 < t.size(); i += 2) {
+>>>>>>> master
         std::string key = toLower(t[i]);
         double val = 0.0;
         try {
             val = parseSpiceNumber(t[i + 1]);
         } catch (const std::exception& e) {
             std::cerr << "Line " << st.lineNo
+<<<<<<< HEAD
                       << ": cannot parse .MODEL param value '"
                       << t[i + 1] << "' in '" << st.raw
                       << "': " << e.what() << "\n";
@@ -634,6 +728,26 @@ void NetlistParser::parseModelCard(const Statement& st) {
         else if (key == "lambda")  m.LAMBDA  = val;
         else if (key == "cjo"
               || key == "cj0")     m.CJO     = val;
+=======
+                      << ": cannot parse .MODEL param " << t[i]
+                      << " = " << t[i+1] << " : " << e.what() << "\n";
+            return;
+        }
+
+        if      (key == "vt")     m.VT      = val;
+        else if (key == "mu")     m.MU      = val;
+        else if (key == "cox")    m.COX     = val;
+        else if (key == "lambda") m.LAMBDA  = val;
+        else if (key == "cj0" || key == "cjo") m.CJO = val;
+    }
+
+    // VT 的符号决定 NMOS / PMOS，内部存成正数
+    if (m.VT < 0.0) {
+        m.isP = true;
+        m.VT  = -m.VT;
+    } else {
+        m.isP = false;
+>>>>>>> master
     }
 
     m.isP = (m.VT < 0.0);

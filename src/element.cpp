@@ -1,4 +1,4 @@
-#define _USW_MATH_DEFINES
+#define _USE_MATH_DEFINES
 #include "element.hpp"
 #include "circuit.hpp"
 #include <iostream>
@@ -83,14 +83,6 @@ void CurrentSource::stampAC(Eigen::MatrixXcd& Y, Eigen::VectorXcd& J,
 void VoltageSource::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
                           const Circuit& ckt,
                           const Eigen::VectorXd& /*x*/,
-<<<<<<< HEAD
-                          double sourceScale) const {
-    int np  = nodeIds[0];
-    int nm  = nodeIds[1];
-    int eqP = ckt.nodes[np].eqIndex;
-    int eqM = ckt.nodes[nm].eqIndex;
-    int k   = branchEqIndex_;
-=======
                           const AnalysisContext& ctx) const {
     int np = nodeIds[0];
     int nm = nodeIds[1];
@@ -98,20 +90,12 @@ void VoltageSource::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
     int eqM = ckt.nodes[nm].eqIndex;
     int k   = branchEqIndex;
 
->>>>>>> 2edfa30d876afc48a5c4ddd7f6e3757c7a097b27
 
     if (k < 0 || k >= G.rows()) {
         std::cerr << "Internal error: invalid branchEqIndex for " << name << "\n";
         return;
     }
 
-<<<<<<< HEAD
-    // DC/OP 分析使用等效直流值（DC 源直接是 dcValue，SIN 源用 VOFF）
-    double Vdc = getDcValue();
-    double V   = sourceScale * Vdc;
-
-    // 节点方程中的电流未知量 I_v
-=======
     double Vval = 0.0;
 
     switch(ctx.type) {
@@ -128,7 +112,6 @@ void VoltageSource::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
             return;
     }
     // 节点方程中的电压源电流 I_v
->>>>>>> 2edfa30d876afc48a5c4ddd7f6e3757c7a097b27
     if (eqP >= 0) G(eqP, k) += 1.0;
     if (eqM >= 0) G(eqM, k) -= 1.0;
 
@@ -198,13 +181,7 @@ void Inductor::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
 void MosfetBase::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
                        const Circuit& ckt,
                        const Eigen::VectorXd& x,
-<<<<<<< HEAD
-                       double sourceScale) const {
-    (void)sourceScale; // MOS 导纳不参与源斜坡，只依赖当前解 x
-
-=======
                        const AnalysisContext&) const {
->>>>>>> 2edfa30d876afc48a5c4ddd7f6e3757c7a097b27
     // 节点：D G S B
     int nD = nodeIds[0];
     int nG = nodeIds[1];
@@ -233,11 +210,15 @@ void MosfetBase::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
     double Vgs_eff = p * (Vg - Vs);
     double Vds_eff = p * (Vd - Vs);
 
-    double Ids_eff = 0.0;
+        double Ids_eff = 0.0;
     double dId_dVds_eff = 0.0;
     double dId_dVgs_eff = 0.0;
 
-    // 简单 Level-1 模型 + channel-length modulation (λ)
+    // 先算“不带 λ”的 Ids0 / gds0 / gm0
+    double Ids0  = 0.0;
+    double gds0  = 0.0;
+    double gm0   = 0.0;
+
     if (Vgs_eff > Vth) {
         double Vov = Vgs_eff - Vth; // overdrive
 
@@ -248,29 +229,26 @@ void MosfetBase::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
 
         if (Vds_eff < Vov) {
             // Triode 区
-            Id0       = K * (Vov * Vds_eff - 0.5 * Vds_eff * Vds_eff);
-            dId0_dVds = K * (Vov - Vds_eff);
-            dId0_dVgs = K * Vds_eff;
+            Ids0 = K * (Vov * Vds_eff - 0.5 * Vds_eff * Vds_eff);
+            gds0 = K * (Vov - Vds_eff);  // ∂Ids0/∂Vds
+            gm0  = K * Vds_eff;          // ∂Ids0/∂Vgs
         } else {
             // Saturation 区
-            Id0       = 0.5 * K * Vov * Vov;
-            dId0_dVds = 0.0;
-            dId0_dVgs = K * Vov;
+            Ids0 = 0.5 * K * Vov * Vov;
+            gds0 = 0.0;
+            gm0  = K * Vov;
         }
-
-        // 引入 λ： Ids = Id0 * (1 + λ Vds)
-        double onePlusLambdaVds = 1.0 + lambda * Vds_eff;
-
-        Ids_eff      = Id0 * onePlusLambdaVds;
-        dId_dVds_eff = dId0_dVds * onePlusLambdaVds + lambda * Id0;
-        dId_dVgs_eff = dId0_dVgs * onePlusLambdaVds;
-    } else {
-        // 截止区：电流近似为 0
-        Ids_eff      = 0.0;
-        dId_dVds_eff = 0.0;
-        dId_dVgs_eff = 0.0;
     }
 
+    // 统一加上沟道长度调制：Ids = Ids0 * (1 + λVds)
+    double factor = 1.0 + lambda * Vds_eff;
+    Ids_eff       = Ids0 * factor;
+
+    // ∂Ids/∂Vds = gds0 * (1 + λVds) + Ids0 * λ
+    dId_dVds_eff  = gds0 * factor + Ids0 * lambda;
+
+    // ∂Ids/∂Vgs = gm0 * (1 + λVds)
+    dId_dVgs_eff  = gm0 * factor;
 
     // 映射回实际器件：Ids 为从 D -> S 的电流
     double Ids = p * Ids_eff;
