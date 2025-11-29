@@ -102,14 +102,6 @@ static VectorXd dcSolveNewtonLU(const Circuit& ckt) {
             MatrixXd G = MatrixXd::Zero(N, N);
             VectorXd I = VectorXd::Zero(N);
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
-            // 根据当前猜测解 x，构建线性化后的 G & I
-            AnalysisContext ctx;
-            ctx.type        = AnalysisType::DC;
-            ctx.sourceScale = scale;
-=======
             AnalysisContext ctx = makeDcCtx(scale);
 
             // 对当前迭代的 x 线性化并 stamp
@@ -160,82 +152,14 @@ static VectorXd dcSolveNewtonGS(const Circuit& ckt) {
             VectorXd I = VectorXd::Zero(N);
 
             AnalysisContext ctx = makeDcCtx(scale);
->>>>>>> master
 
->>>>>>> 2edfa30d876afc48a5c4ddd7f6e3757c7a097b27
             for (const auto& e : ckt.elements) {
                 e->stamp(G, I, ckt, x, ctx);
             }
 
-<<<<<<< HEAD
-            VectorXd xNew = Solver::solveLinearSystemLU(G, I);
-=======
             // 这里用上一轮的 x 当作 Gauss-Seidel 的初值，利用 warm start
             VectorXd xNew =
                 Solver::solveLinearSystemGaussSeidel(G, I, x, 2000, 1e-10);
->>>>>>> master
-
-            double err = (xNew - x).norm();
-            x = xNew;
-
-            if (err < tol) {
-                break;
-            }
-            if (iter == maxNewtonIters - 1) {
-<<<<<<< HEAD
-                std::cerr << "WARNING: Newton (LU) did not converge at ramp step "
-=======
-                std::cerr << "WARNING: Newton (GS) did not converge at ramp step "
->>>>>>> master
-                          << step << "\n";
-            }
-        }
-    }
-
-    return x;
-}
-
-<<<<<<< HEAD
-// 非线性 DC：外层 Newton，内层用 Gauss-Seidel 解线性化后的方程
-static VectorXd dcSolveNewtonGS(const Circuit& ckt) {
-    int N = ckt.numUnknowns();
-    VectorXd x = VectorXd::Zero(std::max(N, 1));
-
-    if (N == 0) {
-        std::cerr << "DC solve (Newton + GS): no unknowns.\n";
-        return x;
-    }
-
-    const int    rampSteps      = 10;
-    const int    maxNewtonIters = 50;
-    const double tol            = 1e-9;
-
-<<<<<<< HEAD
-    x.setZero(N);
-=======
-    // 构建线性方程组 G * x = I
-    AnalysisContext ctx;
-    ctx.type        = AnalysisType::OP;
-    ctx.sourceScale = 1.0;
-
-    for (const auto& e : ckt.elements) {
-        e->stamp(G, I, ckt, x, ctx);
-    }
->>>>>>> 2edfa30d876afc48a5c4ddd7f6e3757c7a097b27
-
-    for (int step = 1; step <= rampSteps; ++step) {
-        double scale = static_cast<double>(step) / rampSteps;
-
-        for (int iter = 0; iter < maxNewtonIters; ++iter) {
-            MatrixXd G = MatrixXd::Zero(N, N);
-            VectorXd I = VectorXd::Zero(N);
-
-            for (const auto& e : ckt.elements) {
-                e->stamp(G, I, ckt, x, scale);
-            }
-
-            // 这里用上一轮的 x 当作 Gauss-Seidel 的初值，利用 warm start
-            VectorXd xNew = Solver::solveLinearSystemGaussSeidel(G, I, x, 2000, 1e-10);
 
             double err = (xNew - x).norm();
             x = xNew;
@@ -253,30 +177,6 @@ static VectorXd dcSolveNewtonGS(const Circuit& ckt) {
     return x;
 }
 
-// ====================== 对外接口 ======================
-
-// 默认 DC：统一用 LU（方便在项目里“随手就用”）
-VectorXd dcSolveLU(const Circuit& ckt) {
-    if (hasNonlinearDevices(ckt)) {
-        return dcSolveNewtonLU(ckt);
-    } else {
-        return dcSolveDirectLU(ckt);
-    }
-}
-
-// 明确指定：DC + Gauss-Seidel
-VectorXd dcSolveGaussSeidel(const Circuit& ckt) {
-    if (hasNonlinearDevices(ckt)) {
-        return dcSolveNewtonGS(ckt);
-    } else {
-        return dcSolveDirectGS(ckt);
-    }
-}
-
-// 老接口：默认等价于 dcSolveLU
-VectorXd dcSolve(const Circuit& ckt) {
-    return dcSolveLU(ckt);
-=======
 // ====================== 对外接口 ======================
 
 // 显式：DC + LU（内部统一用自写 LU）
@@ -300,5 +200,4 @@ VectorXd dcSolveGaussSeidel(const Circuit& ckt) {
 // 老接口：现在默认等价于 Gauss-Seidel 版本
 VectorXd dcSolve(const Circuit& ckt) {
     return dcSolveGaussSeidel(ckt);
->>>>>>> master
 }

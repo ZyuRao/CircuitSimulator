@@ -182,25 +182,8 @@ void Circuit::addMosfet(
     nodes[idb].attachedElements.push_back(idx);
 }
 
-<<<<<<< HEAD
-void Circuit::addMosModel(const MosModel& m)
-{
-    std::string key = toLower(m.name);
-    mosModels[key] = m;
-}
-
-const MosModel* Circuit::findMosModel(const std::string& id) const
-{
-    std::string key = toLower(id);
-    auto it = mosModels.find(key);
-    if (it == mosModels.end()) {
-        return nullptr;
-    }
-    return &it->second;
-=======
 void Circuit::addMosModel(const MosModel& m) {
     mosModels[m.name] = m;
->>>>>>> 2edfa30d876afc48a5c4ddd7f6e3757c7a097b27
 }
 
 void Circuit::printConnectivity() const {

@@ -52,15 +52,7 @@ public:
     void addCurrentSource(const std::string& name, const std::string& np, 
                          const std::string& nm, const SourceSpec& spec);
     void addVoltageSource(const std::string& name, const std::string& np,
-<<<<<<< HEAD
-                         const std::string& nm, double value);
-    void addVoltageSourceSin(const std::string& name, const std::string& np,
-                         const std::string& nm,
-                         double voff, double vamp,
-                         double freq, double phaseDeg);
-=======
                          const std::string& nm, const SourceSpec& spec);
->>>>>>> 2edfa30d876afc48a5c4ddd7f6e3757c7a097b27
     void addMosfet(const std::string& name, const std::string& nd, 
                     const std::string& ng, const std::string& ns, const std::string& modelId,
                     double W, double L);
