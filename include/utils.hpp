@@ -77,4 +77,9 @@ bool isGroundName(const std::string& n) {
     std::string lower = toLower(n);
     return (lower == "0" || lower == "gnd");
 }
+static double clamp01(double x) {
+    if(x < 0.0) return 0.0;
+    if(x > 1.0) return 1.0;
+    return x;
+}
 

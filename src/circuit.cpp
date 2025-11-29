@@ -102,10 +102,10 @@ void Circuit::addInductor(const std::string& name,
 void Circuit::addCurrentSource(const std::string& name,
                                const std::string& np,
                                const std::string& nm,
-                               double value) {
+                               const SourceSpec& spec) {
     int idp = getOrCreateNode(np);
     int idm = getOrCreateNode(nm);
-    auto e = std::make_shared<CurrentSource>(name, idp, idm, value);
+    auto e = std::make_shared<CurrentSource>(name, idp, idm, spec);
     int idx = static_cast<int>(elements.size());
     elements.push_back(e);
     nodes[idp].attachedElements.push_back(idx);
@@ -115,10 +115,10 @@ void Circuit::addCurrentSource(const std::string& name,
 void Circuit::addVoltageSource(const std::string& name,
                                const std::string& np,
                                const std::string& nm,
-                               double value) {
+                               const SourceSpec& spec) {
     int idp = getOrCreateNode(np);
     int idm = getOrCreateNode(nm);
-    auto e = std::make_shared<VoltageSource>(name, idp, idm, value);
+    auto e = std::make_shared<VoltageSource>(name, idp, idm, spec);
     int idx = static_cast<int>(elements.size());
     elements.push_back(e);
     nodes[idp].attachedElements.push_back(idx);
@@ -165,6 +165,10 @@ void Circuit::addMosfet(
     nodes[idg].attachedElements.push_back(idx);
     nodes[ids].attachedElements.push_back(idx);
     nodes[idb].attachedElements.push_back(idx);
+}
+
+void Circuit::addMosModel(const MosModel& m) {
+    mosModels[m.name] = m;
 }
 
 void Circuit::printConnectivity() const {

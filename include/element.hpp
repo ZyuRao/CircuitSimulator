@@ -4,6 +4,9 @@
 #include <string>
 #include <memory>
 #include <Eigen/Dense>
+#include <Eigen/Sparse>
+#include <Eigen/Core>
+#include "sim.hpp"
 
 class Circuit;
 
@@ -22,8 +25,17 @@ public:
     const std::vector<int>& getNodeIds() const { return nodeIds; }
 
     // 在 MNA 方程中插入元件的影响
-    virtual void stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
-                       const Circuit& ckt, const Eigen::VectorXd& x, double sourceScale) const = 0;
+    virtual void stamp(
+        Eigen::MatrixXd& G, Eigen::VectorXd& I, const Circuit& ckt,
+        const Eigen::VectorXd& x, const AnalysisContext& ctx
+    ) const = 0;
+
+    virtual void stampAC(Eigen::MatrixXcd& /*Y*/, Eigen::VectorXcd& /*J*/,
+                         const Circuit& /*ckt*/,
+                         double /*omega*/) const
+    {
+        // 默认啥也不做，只有真正 AC 需要的元件去重载
+    }
 };
 
 class Resistor : public Element {
@@ -35,38 +47,46 @@ public:
 
     void stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
                const Circuit& ckt,
-               const Eigen::VectorXd& /*x*/,
-               double /*sourceScale*/) const override;
+               const Eigen::VectorXd& x,
+               const AnalysisContext& ctx) const override;
 };
 
 // 电流源 I（从 nodeIds[0] -> nodeIds[1]，值为 value）
 class CurrentSource : public Element {
-    double value;
+    SourceSpec spec;
 public:
-    CurrentSource(const std::string& n, int np, int nm, double val)
-        : Element(n, {np, nm}), value(val) {}
+    CurrentSource(const std::string& n, int np, int nm, const SourceSpec& s)
+        : Element(n, {np, nm}), spec(s) {}
+
+    const SourceSpec& setSpec() const { return spec; }
 
     void stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
                const Circuit& ckt,
-               const Eigen::VectorXd& /*x*/,
-               double sourceScale) const override;
+               const Eigen::VectorXd& x,
+               const AnalysisContext& ctx) const override;
+    void stampAC(Eigen::MatrixXcd& Y, Eigen::VectorXcd& J,
+                const Circuit& ckt, double omega) const override;
 };
 
 // 电压源 V（正端 nodeIds[0]，负端 nodeIds[1]）
 class VoltageSource : public Element {
-    double value;
+    SourceSpec spec;
     int branchEqIndex;
 public:
-    VoltageSource(const std::string& n, int np, int nm, double val)
-        : Element(n, {np, nm}), value(val), branchEqIndex(-1) {}
+    VoltageSource(const std::string& n, int np, int nm, const SourceSpec& s)
+        : Element(n, {np, nm}), spec(s), branchEqIndex(-1) {}
 
     void setBranchEqIndex(int idx) { branchEqIndex = idx; }
     int  getBranchEqIndex() const { return branchEqIndex; }
+    const SourceSpec& getSpec() const { return spec; }
 
     void stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
                const Circuit& ckt,
-               const Eigen::VectorXd& /*x*/,
-               double sourceScale) const override;
+               const Eigen::VectorXd& x,
+               const AnalysisContext& ctx) const override;
+
+    void stampAC(Eigen::MatrixXcd& Y, Eigen::VectorXcd& J,
+                const Circuit& ckt, double omega) const override;
 };
 
 
@@ -80,7 +100,7 @@ public:
     void stamp(Eigen::MatrixXd& /*G*/, Eigen::VectorXd& /*I*/,
                const Circuit& /*ckt*/,
                const Eigen::VectorXd& /*x*/,
-               double /*sourceScale*/) const override {
+               const AnalysisContext& ctx) const override {
         // DC 中视为开路，不 stamp
     }
 };
@@ -99,7 +119,7 @@ public:
     void stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
                const Circuit& ckt,
                const Eigen::VectorXd& /*x*/,
-               double /*sourceScale*/) const override;
+               const AnalysisContext& ctx) const override;
 };
 
 // =============== MOSFET：NMOS / PMOS ===============
@@ -137,7 +157,7 @@ public:
     void stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
                const Circuit& ckt,
                const Eigen::VectorXd& x,
-               double /*sourceScale*/) const override;
+               const AnalysisContext& ctx) const override;
 };
 
 class NMosElement : public MosfetBase {

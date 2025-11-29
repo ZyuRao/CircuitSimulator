@@ -256,12 +256,12 @@ void NetlistParser::parseVoltageSource(const Statement& st) {
         std::cerr << "Line " << st.lineNo << ": invalid voltage source: " << st.raw << "\n";
         return;
     }
-    double val = 0.0;
+    SourceSpec spec;
     try {
         if(t.size() >= 5 && toLower(t[3]) == "dc") {
-            val = parseSpiceNumber(t[4]);
+            spec.dcValue = parseSpiceNumber(t[4]);
         } else {
-            val = parseSpiceNumber(t[3]);
+            spec.dcValue = parseSpiceNumber(t[3]);
         }
 
     } catch(const std::exception& e) {
@@ -270,7 +270,7 @@ void NetlistParser::parseVoltageSource(const Statement& st) {
         return;
     }
 
-    ckt.addVoltageSource(t[0], t[1], t[2], val);
+    ckt.addVoltageSource(t[0], t[1], t[2], spec);
 }
 
 
@@ -281,12 +281,12 @@ void NetlistParser::parseCurrentSource(const Statement& st) {
         return;
     }
 
-    double val = 0.0;
+    SourceSpec spec;
     try {
         if (t.size() >= 5 && toLower(t[3]) == "dc") {
-            val = parseSpiceNumber(t[4]);
+            spec.dcValue = parseSpiceNumber(t[4]);
         } else {
-            val = parseSpiceNumber(t[3]);
+            spec.dcValue = parseSpiceNumber(t[3]);
         }
     } catch (const std::exception& e) {
         std::cerr << "Line " << st.lineNo << ": cannot parse I value: " << e.what()
@@ -294,7 +294,7 @@ void NetlistParser::parseCurrentSource(const Statement& st) {
         return;
     }
 
-    ckt.addCurrentSource(t[0], t[1], t[2], val);
+    ckt.addCurrentSource(t[0], t[1], t[2], spec);
 }
 
 void NetlistParser::parseMosfet(const Statement& st) {

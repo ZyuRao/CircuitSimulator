@@ -28,8 +28,12 @@ VectorXd dcSolveNewton(const Circuit& ckt) {
             VectorXd I = VectorXd::Zero(N);
 
             // 根据当前猜测解 x，构建线性化后的 G & I
+            AnalysisContext ctx;
+            ctx.type        = AnalysisType::DC;
+            ctx.sourceScale = scale;
+
             for (const auto& e : ckt.elements) {
-                e->stamp(G, I, ckt, x, scale);
+                e->stamp(G, I, ckt, x, ctx);
             }
 
             // 解 G * x_new = I
@@ -77,8 +81,12 @@ VectorXd dcSolveDirect(const Circuit& ckt) {
     VectorXd I = VectorXd::Zero(N);
 
     // 构建线性方程组 G * x = I
+    AnalysisContext ctx;
+    ctx.type        = AnalysisType::OP;
+    ctx.sourceScale = 1.0;
+
     for (const auto& e : ckt.elements) {
-        e->stamp(G, I, ckt, x, 1.0);
+        e->stamp(G, I, ckt, x, ctx);
     }
 
     // 直接解线性方程组

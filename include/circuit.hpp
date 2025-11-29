@@ -50,9 +50,9 @@ public:
     void addCapacitor(const std::string& name, const std::string& n1, const std::string& n2, double value);
     void addInductor(const std::string& name, const std::string& n1, const std::string& n2, double value);
     void addCurrentSource(const std::string& name, const std::string& np, 
-                         const std::string& nm, double value);
+                         const std::string& nm, const SourceSpec& spec);
     void addVoltageSource(const std::string& name, const std::string& np,
-                         const std::string& nm, double value);
+                         const std::string& nm, const SourceSpec& spec);
     void addMosfet(const std::string& name, const std::string& nd, 
                     const std::string& ng, const std::string& ns, const std::string& modelId,
                     double W, double L);

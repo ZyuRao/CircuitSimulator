@@ -1,13 +1,15 @@
+#define _USW_MATH_DEFINES
 #include "element.hpp"
 #include "circuit.hpp"
 #include <iostream>
+#include <complex>
 
 // =============== 各元件 stamp 实现 ===============
 
 void Resistor::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
                      const Circuit& ckt,
                      const Eigen::VectorXd& /*x*/,
-                     double /*sourceScale*/) const {
+                     const AnalysisContext& ) const {
     (void)I; // 未使用
 
     int n1 = nodeIds[0];
@@ -32,14 +34,28 @@ void Resistor::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
 void CurrentSource::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
                           const Circuit& ckt,
                           const Eigen::VectorXd& /*x*/,
-                          double sourceScale) const {
+                          const AnalysisContext& ctx) const {
     (void)G;
     int np = nodeIds[0];
     int nm = nodeIds[1];
     int eqP = ckt.nodes[np].eqIndex;
     int eqM = ckt.nodes[nm].eqIndex;
 
-    double Ival = sourceScale * value; // 斜坡源：逐步放大
+    double Ival = 0.0; // 斜坡源：逐步放大
+
+    switch(ctx.type) {
+        case AnalysisType::OP:
+        case AnalysisType::DC:
+            Ival = spec.evalDC(ctx.sourceScale);
+            break;
+        case AnalysisType::TRAN:
+            Ival = spec.evalTran(ctx.time);
+            break;
+        case AnalysisType::AC:
+            return;
+        case AnalysisType::NONE:
+            return;
+    }
 
     // 定义为从 p -> m 的电流源，所以“离开 p 的电流”为 +Ival
     // 在 Gv = I 形式下，我们把独立电流源的贡献放入 I 向量
@@ -49,23 +65,52 @@ void CurrentSource::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
     if (eqM >= 0) I(eqM) += Ival;  // 离开 m 的电流 -Ival => I += Ival
 }
 
+void CurrentSource::stampAC(Eigen::MatrixXcd& Y, Eigen::VectorXcd& J,
+                            const Circuit& ckt, double) const {
+    using cd = std::complex<double>;
+    int np = nodeIds[0];
+    int nm = nodeIds[1];
+    int eqP = ckt.nodes[np].eqIndex;
+    int eqM = ckt.nodes[nm].eqIndex;
+
+    double phaseRad = spec.acPhaseDeg * M_PI / 180.0;
+    cd Iac = std::polar(spec.acMag, phaseRad);
+
+    if(eqP >= 0) J(eqP) -= Iac;
+    if(eqM >= 0) J(eqM) += Iac;
+}
+
 void VoltageSource::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
                           const Circuit& ckt,
                           const Eigen::VectorXd& /*x*/,
-                          double sourceScale) const {
+                          const AnalysisContext& ctx) const {
     int np = nodeIds[0];
     int nm = nodeIds[1];
     int eqP = ckt.nodes[np].eqIndex;
     int eqM = ckt.nodes[nm].eqIndex;
     int k   = branchEqIndex;
 
-    double V = sourceScale * value; // 斜坡源
 
     if (k < 0 || k >= G.rows()) {
         std::cerr << "Internal error: invalid branchEqIndex for " << name << "\n";
         return;
     }
 
+    double Vval = 0.0;
+
+    switch(ctx.type) {
+        case AnalysisType::OP:
+        case AnalysisType::DC:
+            Vval = spec.evalDC(ctx.sourceScale);
+            break;
+        case AnalysisType::TRAN:
+            Vval = spec.evalTran(ctx.time);
+            break;
+        case AnalysisType::AC:
+            return;
+        case AnalysisType::NONE:
+            return;
+    }
     // 节点方程中的电压源电流 I_v
     if (eqP >= 0) G(eqP, k) += 1.0;
     if (eqM >= 0) G(eqM, k) -= 1.0;
@@ -74,14 +119,42 @@ void VoltageSource::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
     if (eqP >= 0) G(k, eqP) += 1.0;
     if (eqM >= 0) G(k, eqM) -= 1.0;
 
-    I(k) += V;
+    I(k) += Vval;
+}
+
+void VoltageSource::stampAC(
+    Eigen::MatrixXcd& Y, Eigen::VectorXcd& J, 
+    const Circuit& ckt, double 
+) const {
+    using cd = std::complex<double>;
+    int np = nodeIds[0];
+    int nm = nodeIds[1];
+    int eqP = ckt.nodes[np].eqIndex;
+    int eqM = ckt.nodes[nm].eqIndex;
+    int k   = branchEqIndex;
+
+    if (k < 0 || k >= Y.rows()) {
+        std::cerr << "Internal error: invalid branchEqIndex for " << name << "\n";
+        return;
+    }
+
+    double phaseRad = spec.acPhaseDeg * M_PI / 180.0;
+    cd Vac = std::polar(spec.acMag, phaseRad);
+
+    if (eqP >= 0) Y(eqP, k) += cd(1.0, 0.0);
+    if (eqM >= 0) Y(eqM, k) -= cd(1.0, 0.0);
+
+    if (eqP >= 0) Y(k, eqP) += cd(1.0, 0.0);
+    if (eqM >= 0) Y(k, eqM) -= cd(1.0, 0.0);
+
+    J(k) += Vac;
 }
 
 // 电感在 DC 中视为 0V 电压源（短路 + 支路电流未知量）
 void Inductor::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
                      const Circuit& ckt,
                      const Eigen::VectorXd& /*x*/,
-                     double /*sourceScale*/) const {
+                     const AnalysisContext& ) const {
     (void)I;
     int np = nodeIds[0];
     int nm = nodeIds[1];
@@ -106,7 +179,7 @@ void Inductor::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
 void MosfetBase::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
                        const Circuit& ckt,
                        const Eigen::VectorXd& x,
-                       double /*sourceScale*/) const {
+                       const AnalysisContext&) const {
     // 节点：D G S B
     int nD = nodeIds[0];
     int nG = nodeIds[1];
