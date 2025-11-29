@@ -69,50 +69,6 @@ public:
 };
 
 class VoltageSource : public Element {
-<<<<<<< HEAD
-public:
-    enum class Waveform { DC, SIN };
-
-private:
-    Waveform waveform_;
-    double   dcValue_;      // 对 DC：直流值；对 SIN：VOFF
-    double   sinAmp_;       // VAMP
-    double   sinFreq_;      // 频率 Hz
-    double   sinPhaseDeg_;  // 相位（度）
-    int      branchEqIndex_;
-
-public:
-    // 直流源：V = dc
-    VoltageSource(const std::string& n, int np, int nm, double dc)
-        : Element(n, {np, nm}),
-          waveform_(Waveform::DC),
-          dcValue_(dc),
-          sinAmp_(0.0),
-          sinFreq_(0.0),
-          sinPhaseDeg_(0.0),
-          branchEqIndex_( -1 ) {}
-
-    // 正弦源：V(t) = VOFF + VAMP * sin(2π f t + phase)
-    VoltageSource(const std::string& n, int np, int nm,
-                  double voff, double vamp,
-                  double freq, double phaseDeg)
-        : Element(n, {np, nm}),
-          waveform_(Waveform::SIN),
-          dcValue_(voff),     // DC 工作点使用 VOFF
-          sinAmp_(vamp),
-          sinFreq_(freq),
-          sinPhaseDeg_(phaseDeg),
-          branchEqIndex_( -1 ) {}
-
-    void setBranchEqIndex(int idx) { branchEqIndex_ = idx; }
-    int  getBranchEqIndex() const { return branchEqIndex_; }
-
-    Waveform getWaveform()   const { return waveform_; }
-    double   getDcValue()    const { return dcValue_; }      // DC / OP 用这个
-    double   getSinAmp()     const { return sinAmp_; }
-    double   getSinFreq()    const { return sinFreq_; }
-    double   getSinPhaseDeg() const { return sinPhaseDeg_; }
-=======
     SourceSpec spec;
     int branchEqIndex;
 public:
@@ -122,7 +78,6 @@ public:
     void setBranchEqIndex(int idx) { branchEqIndex = idx; }
     int  getBranchEqIndex() const { return branchEqIndex; }
     const SourceSpec& getSpec() const { return spec; }
->>>>>>> 2edfa30d876afc48a5c4ddd7f6e3757c7a097b27
 
     void stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
                const Circuit& ckt,
@@ -188,11 +143,7 @@ public:
     void stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
                const Circuit& ckt,
                const Eigen::VectorXd& x,
-<<<<<<< HEAD
-               double sourceScale) const override;
-=======
                const AnalysisContext& ctx) const override;
->>>>>>> 2edfa30d876afc48a5c4ddd7f6e3757c7a097b27
 };
 
 class NMosElement : public MosfetBase {
