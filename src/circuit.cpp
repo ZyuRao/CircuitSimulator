@@ -185,3 +185,8 @@ void Circuit::printConnectivity() const {
     }
 }
 
+const MosModel* Circuit::findMosModel(const std::string& id) const {
+    auto it = mosModels.find(id);
+    if (it == mosModels.end()) return nullptr;
+    return &it->second;
+}

@@ -249,29 +249,93 @@ void NetlistParser::parseInductor(const Statement& st) {
     }
     ckt.addInductor(t[0], t[1], t[2], val);
 }
+
 //支持：Vname np nm value / Vname np nm DC value
+//新增支持：Vname np nm SIN v0 va freq [td [phi]]
 void NetlistParser::parseVoltageSource(const Statement& st) {
     const auto& t = st.tokens;
-    if(t.size() < 4) {
-        std::cerr << "Line " << st.lineNo << ": invalid voltage source: " << st.raw << "\n";
+    if (t.size() < 4) {
+        std::cerr << "Line " << st.lineNo
+                  << ": invalid voltage source: " << st.raw << "\n";
         return;
     }
-    SourceSpec spec;
-    try {
-        if(t.size() >= 5 && toLower(t[3]) == "dc") {
-            spec.dcValue = parseSpiceNumber(t[4]);
-        } else {
-            spec.dcValue = parseSpiceNumber(t[3]);
-        }
 
-    } catch(const std::exception& e) {
-        std::cerr << "Line " << st.lineNo << ": cannot parse V value: " << e.what()
+    SourceSpec spec;
+    int idx = 3; // 当前要解析的 token 下标
+
+    // 解析 DC 部分（支持三种写法）:
+    //   Vname np nm value
+    //   Vname np nm DC value
+    //   Vname np nm SIN ...
+    try {
+        if (t.size() >= 5 && toLower(t[3]) == "dc") {
+            // V ... DC value [后面可再跟 SIN ...]
+            spec.dcValue = parseSpiceNumber(t[4]);
+            idx = 5;
+        } else {
+            std::string low3 = toLower(t[3]);
+            if (low3 == "sin") {
+                // V ... SIN v0 va freq [td [phi]]
+                spec.dcValue = 0.0;
+                idx = 3; // 让后面统一从 "SIN" 开始解析
+            } else {
+                // V ... <number> [可能后面再跟 SIN ...]
+                spec.dcValue = parseSpiceNumber(t[3]);
+                idx = 4;
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Line " << st.lineNo
+                  << ": cannot parse V DC value: " << e.what()
                   << " in '" << st.raw << "'\n";
         return;
     }
 
+    // 小工具：解析 "SIN v0 va freq [td [phi]]"
+    auto parseSIN = [&](int sinIdx) {
+        if (toLower(t[sinIdx]) != "sin") return;
+
+        int need = sinIdx + 3; // 至少 SIN + 3 个参数
+        if (t.size() < (std::size_t)need + 1) {
+            std::cerr << "Line " << st.lineNo
+                      << ": SIN needs at least 3 parameters (v0 va freq): "
+                      << st.raw << "\n";
+            return;
+        }
+
+        SinSpec sin;
+        try {
+            sin.v0   = parseSpiceNumber(t[sinIdx + 1]);
+            sin.va   = parseSpiceNumber(t[sinIdx + 2]);
+            sin.freq = parseSpiceNumber(t[sinIdx + 3]);
+
+            if ((int)t.size() > sinIdx + 4) {
+                sin.td = parseSpiceNumber(t[sinIdx + 4]);
+            }
+            if ((int)t.size() > sinIdx + 5) {
+                sin.phi = parseSpiceNumber(t[sinIdx + 5]);
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Line " << st.lineNo
+                      << ": cannot parse SIN parameters: " << e.what()
+                      << " in '" << st.raw << "'\n";
+            return;
+        }
+
+        spec.tran.type = WaveformType::SIN;
+        spec.tran.sine = sin;
+    };
+
+    // 继续解析瞬态波形（只考虑 SIN）
+    if (idx < (int)t.size()) {
+        if (toLower(t[idx]) == "sin") {
+            parseSIN(idx);
+        }
+    }
+
     ckt.addVoltageSource(t[0], t[1], t[2], spec);
 }
+
 
 
 void NetlistParser::parseCurrentSource(const Statement& st) {
@@ -299,20 +363,43 @@ void NetlistParser::parseCurrentSource(const Statement& st) {
 
 void NetlistParser::parseMosfet(const Statement& st) {
     const auto& t = st.tokens;
-    if (t.size() < 7) {
-        std::cerr << "Line " << st.lineNo << ": invalid MOSFET: " << st.raw << "\n";
+
+    // 原支持格式：  M name nd ng ns model W L  （7 个 token）
+    // 助教给的格式：M name nd ng ns type W L modelId  （8 个 token）
+    if (t.size() != 7 && t.size() != 8) {
+        std::cerr << "Line " << st.lineNo
+                  << ": invalid MOSFET: " << st.raw << "\n";
         return;
     }
-    const std::string& name  = t[0];
-    const std::string& nd    = t[1];
-    const std::string& ng    = t[2];
-    const std::string& ns    = t[3];
-    const std::string& model = t[4];  
 
-    double W = parseSpiceNumber(t[5]);
-    double L = parseSpiceNumber(t[6]);
+    const std::string& name = t[0];
+    const std::string& nd   = t[1];
+    const std::string& ng   = t[2];
+    const std::string& ns   = t[3];
 
-    ckt.addMosfet(name, nd, ng, ns, model, W, L);
+    std::string modelId;
+    if (t.size() == 7) {
+        // 教材原始语法：M name nd ng ns model W L
+        modelId = t[4];
+    } else {
+        // buffer.sp 这种：M name nd ng ns p/n W L modelId
+        // 忽略 t[4] 的 p/n，把最后一个 token 当模型 ID（1 / 2）
+        modelId = t.back();
+    }
+
+    double W = 0.0;
+    double L = 0.0;
+    try {
+        W = parseSpiceNumber(t[5]);
+        L = parseSpiceNumber(t[6]);
+    } catch (const std::exception& e) {
+        std::cerr << "Line " << st.lineNo
+                  << ": cannot parse MOS W/L: " << e.what()
+                  << " in '" << st.raw << "'\n";
+        return;
+    }
+
+    ckt.addMosfet(name, nd, ng, ns, modelId, W, L);
 }
 
 AnalysisType NetlistParser::parseAnalysisTypeFromToken(
@@ -348,6 +435,8 @@ void NetlistParser::parseDotCard(const Statement& st) {
         parseAcCard(st);
     } else if (head == ".print") {
         parsePrintCard(st);
+    } else if (head == ".model") {
+        parseModelCard(st);
     } else {
         std::cerr << "Line " << st.lineNo
                   << ": unsupported control card: " << st.raw << "\n";
@@ -517,23 +606,40 @@ void NetlistParser::parsePrintCard(const Statement& st) {
 
 void NetlistParser::parseModelCard(const Statement& st) {
     const auto& t = st.tokens;
-    if(t.size() < 2) {
-        std::cerr << "Line" << st.lineNo << ": invalid .MOBEL:" << st.raw << "\n";
+    if (t.size() < 4) {
+        std::cerr << "Line " << st.lineNo
+                  << ": invalid .MODEL: " << st.raw << "\n";
         return;
     }
-    
-    MosModel m;
-    m.name = t[1];
-    m.isP = (std::toupper((unsigned char)m.name[0]) == 'P');
 
-    for(size_t i = 2; i + 1 < t.size(); i += 2) {
+    MosModel m;
+    m.name = t[1]; // 对应 .MODEL 1 / .MODEL 2 里的 "1" / "2"
+
+    for (size_t i = 2; i + 1 < t.size(); i += 2) {
         std::string key = toLower(t[i]);
-        double val = parseSpiceNumber(t[i+1]);
-        if(key == "vt") m.VT = val;
-        else if(key == "mu") m.MU = val;
-        else if(key == "cox") m.COX = val;
-        else if(key == "lambda") m.LAMBDA = val;
-        else if(key == "cjo") m.CJO = val;
+        double val = 0.0;
+        try {
+            val = parseSpiceNumber(t[i + 1]);
+        } catch (const std::exception& e) {
+            std::cerr << "Line " << st.lineNo
+                      << ": cannot parse .MODEL param " << t[i]
+                      << " = " << t[i+1] << " : " << e.what() << "\n";
+            return;
+        }
+
+        if      (key == "vt")     m.VT      = val;
+        else if (key == "mu")     m.MU      = val;
+        else if (key == "cox")    m.COX     = val;
+        else if (key == "lambda") m.LAMBDA  = val;
+        else if (key == "cj0" || key == "cjo") m.CJO = val;
+    }
+
+    // VT 的符号决定 NMOS / PMOS，内部存成正数
+    if (m.VT < 0.0) {
+        m.isP = true;
+        m.VT  = -m.VT;
+    } else {
+        m.isP = false;
     }
 
     ckt.addMosModel(m);

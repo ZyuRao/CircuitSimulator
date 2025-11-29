@@ -1,4 +1,4 @@
-#define _USW_MATH_DEFINES
+#define _USE_MATH_DEFINES
 #include "element.hpp"
 #include "circuit.hpp"
 #include <iostream>
@@ -208,31 +208,40 @@ void MosfetBase::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
     double Vgs_eff = p * (Vg - Vs);
     double Vds_eff = p * (Vd - Vs);
 
-    double Ids_eff = 0.0;
+        double Ids_eff = 0.0;
     double dId_dVds_eff = 0.0;
     double dId_dVgs_eff = 0.0;
 
-    // 简单 Level-1 模型
+    // 先算“不带 λ”的 Ids0 / gds0 / gm0
+    double Ids0  = 0.0;
+    double gds0  = 0.0;
+    double gm0   = 0.0;
+
     if (Vgs_eff > Vth) {
         double Vov = Vgs_eff - Vth; // overdrive
 
         if (Vds_eff < Vov) {
             // Triode 区
-            Ids_eff = K * ((Vgs_eff - Vth) * Vds_eff - 0.5 * Vds_eff * Vds_eff);
-            dId_dVds_eff = K * ((Vgs_eff - Vth) - Vds_eff);
-            dId_dVgs_eff = K * Vds_eff;
+            Ids0 = K * (Vov * Vds_eff - 0.5 * Vds_eff * Vds_eff);
+            gds0 = K * (Vov - Vds_eff);  // ∂Ids0/∂Vds
+            gm0  = K * Vds_eff;          // ∂Ids0/∂Vgs
         } else {
             // Saturation 区
-            Ids_eff = 0.5 * K * Vov * Vov;
-            dId_dVds_eff = 0.0;
-            dId_dVgs_eff = K * Vov;
+            Ids0 = 0.5 * K * Vov * Vov;
+            gds0 = 0.0;
+            gm0  = K * Vov;
         }
-    } else {
-        // 截止区：电流近似为 0
-        Ids_eff = 0.0;
-        dId_dVds_eff = 0.0;
-        dId_dVgs_eff = 0.0;
     }
+
+    // 统一加上沟道长度调制：Ids = Ids0 * (1 + λVds)
+    double factor = 1.0 + lambda * Vds_eff;
+    Ids_eff       = Ids0 * factor;
+
+    // ∂Ids/∂Vds = gds0 * (1 + λVds) + Ids0 * λ
+    dId_dVds_eff  = gds0 * factor + Ids0 * lambda;
+
+    // ∂Ids/∂Vgs = gm0 * (1 + λVds)
+    dId_dVgs_eff  = gm0 * factor;
 
     // 映射回实际器件：Ids 为从 D -> S 的电流
     double Ids = p * Ids_eff;

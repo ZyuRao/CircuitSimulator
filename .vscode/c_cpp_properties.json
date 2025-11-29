@@ -5,7 +5,8 @@
             "includePath": [
                 "${workspaceFolder}/**",
                 "${workspaceFolder}/include",
-                "C:/mingw64/include/eigen3*"
+                "C:/mingw64/include/eigen3*",
+                "E:/eigen-5.0.0/*"
             ],
             "defines": [
                 "_DEBUG",

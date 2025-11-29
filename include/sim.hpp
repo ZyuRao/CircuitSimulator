@@ -5,6 +5,7 @@
 #include <vector>
 #include <cmath>
 #include "utils.hpp"
+#define M_PI 3.14159265358979323846
 
 enum class AnalysisType {
     NONE,
@@ -134,7 +135,9 @@ struct TranWaveform {
                 }
                 return vv.back();
             }
-                
+            
+            default:
+                return 0.0;
         }
     }
 };
