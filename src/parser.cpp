@@ -251,100 +251,6 @@ void NetlistParser::parseInductor(const Statement& st) {
 }
 
 //支持：Vname np nm value / Vname np nm DC value
-<<<<<<< HEAD
-// 支持：
-//  Vname np nm value                （等价于 DC value）
-//  Vname np nm DC value
-//  Vname np nm SIN voff vamp freq [phase]
-void NetlistParser::parseVoltageSource(const Statement& st) {
-    const auto& t = st.tokens;
-    if (t.size() < 4) {
-        std::cerr << "Line " << st.lineNo << ": invalid voltage source: "
-                  << st.raw << "\n";
-        return;
-    }
-<<<<<<< HEAD
-
-    const std::string& name = t[0];
-    const std::string& np   = t[1];
-    const std::string& nm   = t[2];
-
-    // 关键字在 t[3]
-    std::string kw = toLower(t[3]);
-
-    auto parseNum = [&](const std::string& s, double& out) -> bool {
-        try {
-            out = parseSpiceNumber(s);
-            return true;
-        } catch (...) {
-            return false;
-        }
-    };
-
-    if (kw == "dc") {
-        if (t.size() < 5) {
-            std::cerr << "Line " << st.lineNo << ": DC needs a value: "
-                      << st.raw << "\n";
-            return;
-        }
-        double dc = 0.0;
-        if (!parseNum(t[4], dc)) {
-            std::cerr << "Line " << st.lineNo
-                      << ": cannot parse DC value in voltage source: "
-                      << st.raw << "\n";
-            return;
-        }
-        ckt.addVoltageSource(name, np, nm, dc);
-        return;
-    }
-
-    if (kw == "sin") {
-        if (t.size() < 7) {
-            std::cerr << "Line " << st.lineNo
-                      << ": SIN needs at least voff, vamp, freq: "
-                      << st.raw << "\n";
-            return;
-        }
-        double voff  = 0.0;
-        double vamp  = 0.0;
-        double freq  = 0.0;
-        double phase = 0.0;
-
-        if (!parseNum(t[4], voff) ||
-            !parseNum(t[5], vamp) ||
-            !parseNum(t[6], freq)) {
-            std::cerr << "Line " << st.lineNo
-                      << ": cannot parse SIN parameters: " << st.raw << "\n";
-            return;
-        }
-        if (t.size() >= 8) {
-            parseNum(t[7], phase); // 失败就保留 0
-=======
-    SourceSpec spec;
-    try {
-        if(t.size() >= 5 && toLower(t[3]) == "dc") {
-            spec.dcValue = parseSpiceNumber(t[4]);
-        } else {
-            spec.dcValue = parseSpiceNumber(t[3]);
->>>>>>> 2edfa30d876afc48a5c4ddd7f6e3757c7a097b27
-        }
-
-        ckt.addVoltageSourceSin(name, np, nm, voff, vamp, freq, phase);
-        return;
-    }
-
-    // 兼容简写：Vname np nm value
-    double dc = 0.0;
-    if (!parseNum(t[3], dc)) {
-        std::cerr << "Line " << st.lineNo
-                  << ": cannot parse V value: " << t[3]
-                  << " in '" << st.raw << "'\n";
-        return;
-    }
-<<<<<<< HEAD
-    ckt.addVoltageSource(name, np, nm, dc);
-=======
-=======
 //新增支持：Vname np nm SIN v0 va freq [td [phi]]
 void NetlistParser::parseVoltageSource(const Statement& st) {
     const auto& t = st.tokens;
@@ -426,10 +332,8 @@ void NetlistParser::parseVoltageSource(const Statement& st) {
             parseSIN(idx);
         }
     }
->>>>>>> master
 
     ckt.addVoltageSource(t[0], t[1], t[2], spec);
->>>>>>> 2edfa30d876afc48a5c4ddd7f6e3757c7a097b27
 }
 
 
@@ -498,6 +402,17 @@ void NetlistParser::parseMosfet(const Statement& st) {
     ckt.addMosfet(name, nd, ng, ns, modelId, W, L);
 }
 
+AnalysisType NetlistParser::parseAnalysisTypeFromToken(
+    const std::string& tok
+) const {
+    std::string t = toLower(tok);
+
+    if (t == "op")   return AnalysisType::OP;
+    if (t == "dc")   return AnalysisType::DC;
+    if (t == "ac")   return AnalysisType::AC;
+    if (t == "tran") return AnalysisType::TRAN;
+    return AnalysisType::NONE;
+}
 
 AcSweepType NetlistParser::parseAcSweepTypeFromToken(const std::string& tok) const {
     std::string s = toLower(tok);
@@ -696,39 +611,17 @@ void NetlistParser::parseModelCard(const Statement& st) {
                   << ": invalid .MODEL: " << st.raw << "\n";
         return;
     }
-<<<<<<< HEAD
-
-    MosModel m;
-    m.name = t[1];
-
-    for (std::size_t i = 2; i + 1 < t.size(); i += 2) {
-=======
 
     MosModel m;
     m.name = t[1]; // 对应 .MODEL 1 / .MODEL 2 里的 "1" / "2"
 
     for (size_t i = 2; i + 1 < t.size(); i += 2) {
->>>>>>> master
         std::string key = toLower(t[i]);
         double val = 0.0;
         try {
             val = parseSpiceNumber(t[i + 1]);
         } catch (const std::exception& e) {
             std::cerr << "Line " << st.lineNo
-<<<<<<< HEAD
-                      << ": cannot parse .MODEL param value '"
-                      << t[i + 1] << "' in '" << st.raw
-                      << "': " << e.what() << "\n";
-            continue;
-        }
-
-        if      (key == "vt")      m.VT      = val;
-        else if (key == "mu")      m.MU      = val;
-        else if (key == "cox")     m.COX     = val;
-        else if (key == "lambda")  m.LAMBDA  = val;
-        else if (key == "cjo"
-              || key == "cj0")     m.CJO     = val;
-=======
                       << ": cannot parse .MODEL param " << t[i]
                       << " = " << t[i+1] << " : " << e.what() << "\n";
             return;
@@ -747,10 +640,7 @@ void NetlistParser::parseModelCard(const Statement& st) {
         m.VT  = -m.VT;
     } else {
         m.isP = false;
->>>>>>> master
     }
-
-    m.isP = (m.VT < 0.0);
 
     ckt.addMosModel(m);
 }
