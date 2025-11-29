@@ -199,5 +199,5 @@ VectorXd dcSolveGaussSeidel(const Circuit& ckt) {
 
 // 老接口：现在默认等价于 Gauss-Seidel 版本
 VectorXd dcSolve(const Circuit& ckt) {
-    return dcSolveGaussSeidel(ckt);
+    return dcSolveLU(ckt);
 }

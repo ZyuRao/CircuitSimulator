@@ -137,24 +137,41 @@ void NetlistParser::lex(std::istream& in) {
 void NetlistParser::parseStatements() {
     bool titleConsumed = false;
 
-    for(const auto& st : stmts) {
-        if(st.tokens.empty()) continue;
+    // 第 1 遍：先把所有 .MODEL 读进来
+    for (const auto& st : stmts) {
+        if (st.tokens.empty()) continue;
 
-        const std::string& head = st.tokens[0];
-        if(head.empty()) continue;
+        std::string head = toLower(st.tokens[0]);
+        if (head == ".model") {
+            parseModelCard(st);
+        }
+    }
 
-        if(head[0] == '.') {
-            parseDotCard(st);
+    // 第 2 遍：处理其余控制卡 + 所有器件
+    for (const auto& st : stmts) {
+        if (st.tokens.empty()) continue;
+
+        const std::string& headTok = st.tokens[0];
+        if (headTok.empty()) continue;
+
+        if (headTok[0] == '.') {
+            std::string head = toLower(headTok);
+            if (head == ".model") {
+                // .MODEL 已经在第一遍处理过
+                continue;
+            }
+            parseDotCard(st); // .OP / .DC / .AC / .TRAN / .PRINT 等
             continue;
         }
 
+        // 处理标题行（如果有）
         parseTitle(st, titleConsumed);
-        if(!titleConsumed && st.tokens.empty()) {
+        if (!titleConsumed && st.tokens.empty()) {
             continue;
         }
 
-        if(!st.tokens.empty()) {
-            parseDeviceStmt(st);
+        if (!st.tokens.empty()) {
+            parseDeviceStmt(st); // R/C/L/V/I/M ...
         }
     }
 

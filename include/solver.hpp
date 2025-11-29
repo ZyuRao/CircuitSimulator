@@ -134,6 +134,7 @@ inline VectorXd solveLinearSystemLU(const MatrixXd& A, const VectorXd& b) {
 //
 // 解 A x = b
 // x0 为初值（可以用上一轮牛顿迭代的 x，当作 warm start）
+// 遇到对角元接近 0 时，增加一个极小量进行正则化，避免直接失败。
 // 返回最后一次迭代结果（不保证一定收敛）
 inline VectorXd solveLinearSystemGaussSeidel(const MatrixXd& A,
                                              const VectorXd& b,
@@ -155,16 +156,19 @@ inline VectorXd solveLinearSystemGaussSeidel(const MatrixXd& A,
     }
 
     VectorXd xOld = x;
+    const double diagEps = 1e-12; // 对角正则化的极小量
 
     for (int iter = 0; iter < maxIters; ++iter) {
         xOld = x;
 
         for (int i = 0; i < n; ++i) {
             double diag = A(i, i);
-            if (std::fabs(diag) < 1e-15) {
-                std::cerr << "Gauss-Seidel: zero diagonal at row " << i
-                          << ", cannot iterate.\n";
-                return x;
+
+            // 对角元过小，用一个极小量替代，避免除以 0
+            if (std::fabs(diag) < diagEps) {
+                // 保持原来的符号（如果有），否则默认为正
+                double sign = (diag >= 0.0 ? 1.0 : -1.0);
+                diag = sign * diagEps;
             }
 
             double sum = b(i);
