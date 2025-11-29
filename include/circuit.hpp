@@ -53,6 +53,10 @@ public:
                          const std::string& nm, double value);
     void addVoltageSource(const std::string& name, const std::string& np,
                          const std::string& nm, double value);
+    void addVoltageSourceSin(const std::string& name, const std::string& np,
+                         const std::string& nm,
+                         double voff, double vamp,
+                         double freq, double phaseDeg);
     void addMosfet(const std::string& name, const std::string& nd, 
                     const std::string& ng, const std::string& ns, const std::string& modelId,
                     double W, double L);

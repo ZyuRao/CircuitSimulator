@@ -250,28 +250,89 @@ void NetlistParser::parseInductor(const Statement& st) {
     ckt.addInductor(t[0], t[1], t[2], val);
 }
 //支持：Vname np nm value / Vname np nm DC value
+// 支持：
+//  Vname np nm value                （等价于 DC value）
+//  Vname np nm DC value
+//  Vname np nm SIN voff vamp freq [phase]
 void NetlistParser::parseVoltageSource(const Statement& st) {
     const auto& t = st.tokens;
-    if(t.size() < 4) {
-        std::cerr << "Line " << st.lineNo << ": invalid voltage source: " << st.raw << "\n";
+    if (t.size() < 4) {
+        std::cerr << "Line " << st.lineNo << ": invalid voltage source: "
+                  << st.raw << "\n";
         return;
     }
-    double val = 0.0;
-    try {
-        if(t.size() >= 5 && toLower(t[3]) == "dc") {
-            val = parseSpiceNumber(t[4]);
-        } else {
-            val = parseSpiceNumber(t[3]);
+
+    const std::string& name = t[0];
+    const std::string& np   = t[1];
+    const std::string& nm   = t[2];
+
+    // 关键字在 t[3]
+    std::string kw = toLower(t[3]);
+
+    auto parseNum = [&](const std::string& s, double& out) -> bool {
+        try {
+            out = parseSpiceNumber(s);
+            return true;
+        } catch (...) {
+            return false;
+        }
+    };
+
+    if (kw == "dc") {
+        if (t.size() < 5) {
+            std::cerr << "Line " << st.lineNo << ": DC needs a value: "
+                      << st.raw << "\n";
+            return;
+        }
+        double dc = 0.0;
+        if (!parseNum(t[4], dc)) {
+            std::cerr << "Line " << st.lineNo
+                      << ": cannot parse DC value in voltage source: "
+                      << st.raw << "\n";
+            return;
+        }
+        ckt.addVoltageSource(name, np, nm, dc);
+        return;
+    }
+
+    if (kw == "sin") {
+        if (t.size() < 7) {
+            std::cerr << "Line " << st.lineNo
+                      << ": SIN needs at least voff, vamp, freq: "
+                      << st.raw << "\n";
+            return;
+        }
+        double voff  = 0.0;
+        double vamp  = 0.0;
+        double freq  = 0.0;
+        double phase = 0.0;
+
+        if (!parseNum(t[4], voff) ||
+            !parseNum(t[5], vamp) ||
+            !parseNum(t[6], freq)) {
+            std::cerr << "Line " << st.lineNo
+                      << ": cannot parse SIN parameters: " << st.raw << "\n";
+            return;
+        }
+        if (t.size() >= 8) {
+            parseNum(t[7], phase); // 失败就保留 0
         }
 
-    } catch(const std::exception& e) {
-        std::cerr << "Line " << st.lineNo << ": cannot parse V value: " << e.what()
+        ckt.addVoltageSourceSin(name, np, nm, voff, vamp, freq, phase);
+        return;
+    }
+
+    // 兼容简写：Vname np nm value
+    double dc = 0.0;
+    if (!parseNum(t[3], dc)) {
+        std::cerr << "Line " << st.lineNo
+                  << ": cannot parse V value: " << t[3]
                   << " in '" << st.raw << "'\n";
         return;
     }
-
-    ckt.addVoltageSource(t[0], t[1], t[2], val);
+    ckt.addVoltageSource(name, np, nm, dc);
 }
+
 
 
 void NetlistParser::parseCurrentSource(const Statement& st) {
@@ -299,33 +360,45 @@ void NetlistParser::parseCurrentSource(const Statement& st) {
 
 void NetlistParser::parseMosfet(const Statement& st) {
     const auto& t = st.tokens;
-    if (t.size() < 7) {
-        std::cerr << "Line " << st.lineNo << ": invalid MOSFET: " << st.raw << "\n";
+
+    // 原支持格式：  M name nd ng ns model W L  （7 个 token）
+    // 助教给的格式：M name nd ng ns type W L modelId  （8 个 token）
+    if (t.size() != 7 && t.size() != 8) {
+        std::cerr << "Line " << st.lineNo
+                  << ": invalid MOSFET: " << st.raw << "\n";
         return;
     }
-    const std::string& name  = t[0];
-    const std::string& nd    = t[1];
-    const std::string& ng    = t[2];
-    const std::string& ns    = t[3];
-    const std::string& model = t[4];  
 
-    double W = parseSpiceNumber(t[5]);
-    double L = parseSpiceNumber(t[6]);
+    const std::string& name = t[0];
+    const std::string& nd   = t[1];
+    const std::string& ng   = t[2];
+    const std::string& ns   = t[3];
 
-    ckt.addMosfet(name, nd, ng, ns, model, W, L);
+    std::string modelId;
+    if (t.size() == 7) {
+        // 教材原始语法：M name nd ng ns model W L
+        modelId = t[4];
+    } else {
+        // buffer.sp 这种：M name nd ng ns p/n W L modelId
+        // 忽略 t[4] 的 p/n，把最后一个 token 当模型 ID（1 / 2）
+        modelId = t.back();
+    }
+
+    double W = 0.0;
+    double L = 0.0;
+    try {
+        W = parseSpiceNumber(t[5]);
+        L = parseSpiceNumber(t[6]);
+    } catch (const std::exception& e) {
+        std::cerr << "Line " << st.lineNo
+                  << ": cannot parse MOS W/L: " << e.what()
+                  << " in '" << st.raw << "'\n";
+        return;
+    }
+
+    ckt.addMosfet(name, nd, ng, ns, modelId, W, L);
 }
 
-AnalysisType NetlistParser::parseAnalysisTypeFromToken(
-    const std::string& tok
-) const {
-    std::string t = toLower(tok);
-
-    if (t == "op")   return AnalysisType::OP;
-    if (t == "dc")   return AnalysisType::DC;
-    if (t == "ac")   return AnalysisType::AC;
-    if (t == "tran") return AnalysisType::TRAN;
-    return AnalysisType::NONE;
-}
 
 AcSweepType NetlistParser::parseAcSweepTypeFromToken(const std::string& tok) const {
     std::string s = toLower(tok);
@@ -348,6 +421,8 @@ void NetlistParser::parseDotCard(const Statement& st) {
         parseAcCard(st);
     } else if (head == ".print") {
         parsePrintCard(st);
+    } else if (head == ".model") {
+        parseModelCard(st);
     } else {
         std::cerr << "Line " << st.lineNo
                   << ": unsupported control card: " << st.raw << "\n";
@@ -517,24 +592,37 @@ void NetlistParser::parsePrintCard(const Statement& st) {
 
 void NetlistParser::parseModelCard(const Statement& st) {
     const auto& t = st.tokens;
-    if(t.size() < 2) {
-        std::cerr << "Line" << st.lineNo << ": invalid .MOBEL:" << st.raw << "\n";
+    if (t.size() < 4) {
+        std::cerr << "Line " << st.lineNo
+                  << ": invalid .MODEL: " << st.raw << "\n";
         return;
     }
-    
+
     MosModel m;
     m.name = t[1];
-    m.isP = (std::toupper((unsigned char)m.name[0]) == 'P');
 
-    for(size_t i = 2; i + 1 < t.size(); i += 2) {
+    for (std::size_t i = 2; i + 1 < t.size(); i += 2) {
         std::string key = toLower(t[i]);
-        double val = parseSpiceNumber(t[i+1]);
-        if(key == "vt") m.VT = val;
-        else if(key == "mu") m.MU = val;
-        else if(key == "cox") m.COX = val;
-        else if(key == "lambda") m.LAMBDA = val;
-        else if(key == "cjo") m.CJO = val;
+        double val = 0.0;
+        try {
+            val = parseSpiceNumber(t[i + 1]);
+        } catch (const std::exception& e) {
+            std::cerr << "Line " << st.lineNo
+                      << ": cannot parse .MODEL param value '"
+                      << t[i + 1] << "' in '" << st.raw
+                      << "': " << e.what() << "\n";
+            continue;
+        }
+
+        if      (key == "vt")      m.VT      = val;
+        else if (key == "mu")      m.MU      = val;
+        else if (key == "cox")     m.COX     = val;
+        else if (key == "lambda")  m.LAMBDA  = val;
+        else if (key == "cjo"
+              || key == "cj0")     m.CJO     = val;
     }
+
+    m.isP = (m.VT < 0.0);
 
     ckt.addMosModel(m);
 }

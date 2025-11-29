@@ -2,13 +2,13 @@
 #include <string>
 #include <vector>
 
-std::string ltrim(const std::string& s) {
+inline std::string ltrim(const std::string& s) {
     std::size_t pos = s.find_first_not_of(" \t\r\n");
     if (pos == std::string::npos) return "";
     return s.substr(pos);
 }
 
-std::string toLower(const std::string& s) {
+inline std::string toLower(const std::string& s) {
     std::string t = s;
     for (char &c : t) {
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -17,7 +17,7 @@ std::string toLower(const std::string& s) {
 }
 
 // 支持科学计数法 + SPICE 后缀：10k, 1u, 3e12, 3.3meg 等
-double parseSpiceNumber(const std::string& token) {
+inline double parseSpiceNumber(const std::string& token) {
     std::string s = toLower(token);
 
     // 先尝试直接用 stod 解析（可以处理 3e12、-1.2e-3 等）
@@ -73,7 +73,7 @@ double parseSpiceNumber(const std::string& token) {
     }
 }
 
-bool isGroundName(const std::string& n) {
+inline bool isGroundName(const std::string& n) {
     std::string lower = toLower(n);
     return (lower == "0" || lower == "gnd");
 }

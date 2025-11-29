@@ -125,6 +125,21 @@ void Circuit::addVoltageSource(const std::string& name,
     nodes[idm].attachedElements.push_back(idx);
 }
 
+void Circuit::addVoltageSourceSin(const std::string& name,
+                                  const std::string& np,
+                                  const std::string& nm,
+                                  double voff, double vamp,
+                                  double freq, double phaseDeg) {
+    int idp = getOrCreateNode(np);
+    int idm = getOrCreateNode(nm);
+    auto e  = std::make_shared<VoltageSource>(name, idp, idm,
+                                              voff, vamp, freq, phaseDeg);
+    int idx = static_cast<int>(elements.size());
+    elements.push_back(e);
+    nodes[idp].attachedElements.push_back(idx);
+    nodes[idm].attachedElements.push_back(idx);
+}
+
 void Circuit::addMosfet(
     const std::string& name, const std::string& nd, 
     const std::string& ng, const std::string& ns,
@@ -165,6 +180,22 @@ void Circuit::addMosfet(
     nodes[idg].attachedElements.push_back(idx);
     nodes[ids].attachedElements.push_back(idx);
     nodes[idb].attachedElements.push_back(idx);
+}
+
+void Circuit::addMosModel(const MosModel& m)
+{
+    std::string key = toLower(m.name);
+    mosModels[key] = m;
+}
+
+const MosModel* Circuit::findMosModel(const std::string& id) const
+{
+    std::string key = toLower(id);
+    auto it = mosModels.find(key);
+    if (it == mosModels.end()) {
+        return nullptr;
+    }
+    return &it->second;
 }
 
 void Circuit::printConnectivity() const {

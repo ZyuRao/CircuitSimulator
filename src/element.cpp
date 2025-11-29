@@ -53,20 +53,22 @@ void VoltageSource::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
                           const Circuit& ckt,
                           const Eigen::VectorXd& /*x*/,
                           double sourceScale) const {
-    int np = nodeIds[0];
-    int nm = nodeIds[1];
+    int np  = nodeIds[0];
+    int nm  = nodeIds[1];
     int eqP = ckt.nodes[np].eqIndex;
     int eqM = ckt.nodes[nm].eqIndex;
-    int k   = branchEqIndex;
-
-    double V = sourceScale * value; // 斜坡源
+    int k   = branchEqIndex_;
 
     if (k < 0 || k >= G.rows()) {
         std::cerr << "Internal error: invalid branchEqIndex for " << name << "\n";
         return;
     }
 
-    // 节点方程中的电压源电流 I_v
+    // DC/OP 分析使用等效直流值（DC 源直接是 dcValue，SIN 源用 VOFF）
+    double Vdc = getDcValue();
+    double V   = sourceScale * Vdc;
+
+    // 节点方程中的电流未知量 I_v
     if (eqP >= 0) G(eqP, k) += 1.0;
     if (eqM >= 0) G(eqM, k) -= 1.0;
 
@@ -76,6 +78,8 @@ void VoltageSource::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
 
     I(k) += V;
 }
+
+
 
 // 电感在 DC 中视为 0V 电压源（短路 + 支路电流未知量）
 void Inductor::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
@@ -106,7 +110,9 @@ void Inductor::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
 void MosfetBase::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
                        const Circuit& ckt,
                        const Eigen::VectorXd& x,
-                       double /*sourceScale*/) const {
+                       double sourceScale) const {
+    (void)sourceScale; // MOS 导纳不参与源斜坡，只依赖当前解 x
+
     // 节点：D G S B
     int nD = nodeIds[0];
     int nG = nodeIds[1];
@@ -139,27 +145,40 @@ void MosfetBase::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
     double dId_dVds_eff = 0.0;
     double dId_dVgs_eff = 0.0;
 
-    // 简单 Level-1 模型
+    // 简单 Level-1 模型 + channel-length modulation (λ)
     if (Vgs_eff > Vth) {
         double Vov = Vgs_eff - Vth; // overdrive
 
+        // 先计算不含 λ 的 Ids0 及其导数
+        double Id0        = 0.0;
+        double dId0_dVds  = 0.0;
+        double dId0_dVgs  = 0.0;
+
         if (Vds_eff < Vov) {
             // Triode 区
-            Ids_eff = K * ((Vgs_eff - Vth) * Vds_eff - 0.5 * Vds_eff * Vds_eff);
-            dId_dVds_eff = K * ((Vgs_eff - Vth) - Vds_eff);
-            dId_dVgs_eff = K * Vds_eff;
+            Id0       = K * (Vov * Vds_eff - 0.5 * Vds_eff * Vds_eff);
+            dId0_dVds = K * (Vov - Vds_eff);
+            dId0_dVgs = K * Vds_eff;
         } else {
             // Saturation 区
-            Ids_eff = 0.5 * K * Vov * Vov;
-            dId_dVds_eff = 0.0;
-            dId_dVgs_eff = K * Vov;
+            Id0       = 0.5 * K * Vov * Vov;
+            dId0_dVds = 0.0;
+            dId0_dVgs = K * Vov;
         }
+
+        // 引入 λ： Ids = Id0 * (1 + λ Vds)
+        double onePlusLambdaVds = 1.0 + lambda * Vds_eff;
+
+        Ids_eff      = Id0 * onePlusLambdaVds;
+        dId_dVds_eff = dId0_dVds * onePlusLambdaVds + lambda * Id0;
+        dId_dVgs_eff = dId0_dVgs * onePlusLambdaVds;
     } else {
         // 截止区：电流近似为 0
-        Ids_eff = 0.0;
+        Ids_eff      = 0.0;
         dId_dVds_eff = 0.0;
         dId_dVgs_eff = 0.0;
     }
+
 
     // 映射回实际器件：Ids 为从 D -> S 的电流
     double Ids = p * Ids_eff;

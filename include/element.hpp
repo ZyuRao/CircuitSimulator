@@ -52,16 +52,49 @@ public:
                double sourceScale) const override;
 };
 
-// 电压源 V（正端 nodeIds[0]，负端 nodeIds[1]）
 class VoltageSource : public Element {
-    double value;
-    int branchEqIndex;
 public:
-    VoltageSource(const std::string& n, int np, int nm, double val)
-        : Element(n, {np, nm}), value(val), branchEqIndex(-1) {}
+    enum class Waveform { DC, SIN };
 
-    void setBranchEqIndex(int idx) { branchEqIndex = idx; }
-    int  getBranchEqIndex() const { return branchEqIndex; }
+private:
+    Waveform waveform_;
+    double   dcValue_;      // 对 DC：直流值；对 SIN：VOFF
+    double   sinAmp_;       // VAMP
+    double   sinFreq_;      // 频率 Hz
+    double   sinPhaseDeg_;  // 相位（度）
+    int      branchEqIndex_;
+
+public:
+    // 直流源：V = dc
+    VoltageSource(const std::string& n, int np, int nm, double dc)
+        : Element(n, {np, nm}),
+          waveform_(Waveform::DC),
+          dcValue_(dc),
+          sinAmp_(0.0),
+          sinFreq_(0.0),
+          sinPhaseDeg_(0.0),
+          branchEqIndex_( -1 ) {}
+
+    // 正弦源：V(t) = VOFF + VAMP * sin(2π f t + phase)
+    VoltageSource(const std::string& n, int np, int nm,
+                  double voff, double vamp,
+                  double freq, double phaseDeg)
+        : Element(n, {np, nm}),
+          waveform_(Waveform::SIN),
+          dcValue_(voff),     // DC 工作点使用 VOFF
+          sinAmp_(vamp),
+          sinFreq_(freq),
+          sinPhaseDeg_(phaseDeg),
+          branchEqIndex_( -1 ) {}
+
+    void setBranchEqIndex(int idx) { branchEqIndex_ = idx; }
+    int  getBranchEqIndex() const { return branchEqIndex_; }
+
+    Waveform getWaveform()   const { return waveform_; }
+    double   getDcValue()    const { return dcValue_; }      // DC / OP 用这个
+    double   getSinAmp()     const { return sinAmp_; }
+    double   getSinFreq()    const { return sinFreq_; }
+    double   getSinPhaseDeg() const { return sinPhaseDeg_; }
 
     void stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
                const Circuit& ckt,
@@ -137,20 +170,20 @@ public:
     void stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
                const Circuit& ckt,
                const Eigen::VectorXd& x,
-               double /*sourceScale*/) const override;
+               double sourceScale) const override;
 };
 
 class NMosElement : public MosfetBase {
 public:
     NMosElement(const std::string& n, int nd, int ng, int ns, int nb,
-        bool isPchannel, double Vth_ , double K_, double lambda_, double Cj0_)
+        double Vth_ , double K_, double lambda_, double Cj0_)
         : MosfetBase(n, nd, ng, ns, nb, false, Vth_, K_, lambda_, Cj0_) {}
 };
 
 class PMosElement : public MosfetBase {
 public:
     PMosElement(const std::string& n, int nd, int ng, int ns, int nb,
-        bool isPchannel, double Vth_ , double K_, double lambda_, double Cj0_)
+        double Vth_ , double K_, double lambda_, double Cj0_)
         : MosfetBase(n, nd, ng, ns, nb, true, Vth_, K_, lambda_, Cj0_) {}
 };
 
