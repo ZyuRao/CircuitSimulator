@@ -149,7 +149,11 @@ struct SourceSpec {
     TranWaveform tran;
 
     double evalDC(double scale) const {
-        return dcValue * scale;
+        double base = dcValue;
+        if(tran.type == WaveformType::SIN) {
+            base += tran.sine.v0;
+        }
+        return base * scale;
     }
 
     double evalTran(double t) const {

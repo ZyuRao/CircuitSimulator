@@ -210,7 +210,7 @@ void MosfetBase::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
     double Vgs_eff = p * (Vg - Vs);
     double Vds_eff = p * (Vd - Vs);
 
-        double Ids_eff = 0.0;
+    double Ids_eff = 0.0;
     double dId_dVds_eff = 0.0;
     double dId_dVgs_eff = 0.0;
 
@@ -219,7 +219,9 @@ void MosfetBase::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
     double gds0  = 0.0;
     double gm0   = 0.0;
 
-    if (Vgs_eff > Vth) {
+    bool on = false;
+    if (Vgs_eff > Vth && Vds_eff >= 0) {
+        on = true;
         double Vov = Vgs_eff - Vth; // overdrive
 
         // 先计算不含 λ 的 Ids0 及其导数
@@ -240,8 +242,18 @@ void MosfetBase::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
         }
     }
 
+    {
+        const double gmin = 1e-9;
+       if(!on) {
+            Ids0 = 0.0;
+            gm0 = 0.0;
+            gds0 = gmin;
+       }
+    }
+
     // 统一加上沟道长度调制：Ids = Ids0 * (1 + λVds)
     double factor = 1.0 + lambda * Vds_eff;
+    if(factor < 0.0) factor = 0.0;
     Ids_eff       = Ids0 * factor;
 
     // ∂Ids/∂Vds = gds0 * (1 + λVds) + Ids0 * λ

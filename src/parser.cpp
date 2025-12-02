@@ -179,7 +179,7 @@ void NetlistParser::parseStatements() {
 }
 
 void NetlistParser::parseTitle(const Statement& st, bool& titleConsumed) {
-    if(!titleConsumed || st.tokens.empty()) return;
+    if(titleConsumed || st.tokens.empty()) return;
 
     const std::string& head = st.tokens[0];
     char c0 = static_cast<char>(

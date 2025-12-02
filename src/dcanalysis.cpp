@@ -30,6 +30,16 @@ static bool hasNonlinearDevices(const Circuit& ckt) {
     return false;
 }
 
+//全局gmin-to-ground，后续可能有用
+static void stampGlobalGmin(const Circuit& ckt, MatrixXd& G, double gmin) {
+    for(const auto& node : ckt.nodes) {
+        int eq = node.eqIndex;
+        if(eq >= 0 && eq < G.rows()) {
+            G(eq, eq) += gmin;
+        }
+    }
+}
+
 // 只处理线性电路，线性方程 G x = I，用 LU 直接解
 static VectorXd dcSolveDirectLU(const Circuit& ckt) {
     int N = ckt.numUnknowns();
@@ -109,9 +119,14 @@ static VectorXd dcSolveNewtonLU(const Circuit& ckt) {
                 e->stamp(G, I, ckt, x, ctx);
             }
 
+            stampGlobalGmin(ckt, G, 1e-6);
+
             // 解 G x_new = I
             VectorXd xNew = Solver::solveLinearSystemLU(G, I);
 
+
+            const double alpha = 0.45;
+            xNew = x + alpha * (xNew - x);
             double err = (xNew - x).norm();
             x = xNew;
 
@@ -156,6 +171,8 @@ static VectorXd dcSolveNewtonGS(const Circuit& ckt) {
             for (const auto& e : ckt.elements) {
                 e->stamp(G, I, ckt, x, ctx);
             }
+
+            stampGlobalGmin(ckt, G, 1e-6);
 
             // 这里用上一轮的 x 当作 Gauss-Seidel 的初值，利用 warm start
             VectorXd xNew =
