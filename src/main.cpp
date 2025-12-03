@@ -1,4 +1,4 @@
-// main.cpp -- 专门测试 DC 工作点求解
+// main.cpp -- DC 工作点 + 瞬态仿真（后向欧拉）
 
 #include <iostream>
 #include <iomanip>
@@ -9,15 +9,17 @@
 #include "circuit.hpp"
 #include "dcanalysis.hpp"
 #include "sim.hpp"
-#include "element.hpp"   // 为了 dynamic_pointer_cast VoltageSource / Inductor
+#include "element.hpp"
+#include "tanalisis.hpp"
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: mysim_dc.exe <netlist.sp>\n";
+        std::cerr << "Usage: mysim.exe <netlist.sp> [tran_out.csv]\n";
         return 1;
     }
 
     std::string netlistFile = argv[1];
+    std::string tranOutFile = (argc >= 3) ? argv[2] : "tran_out.csv";
 
     Circuit ckt;
     SimulationConfig sim;
@@ -29,7 +31,6 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // 分配节点方程号 + 电压源/电感的支路电流方程号
     ckt.assignEquationIndices();
 
     std::cout << "\n==== Circuit summary ====\n";
@@ -39,49 +40,43 @@ int main(int argc, char** argv) {
               << "  (nodeEq=" << ckt.numNodeEquations()
               << ", branchEq=" << ckt.numVoltageBranches() << ")\n";
 
-    // 调用 DC 求解器（内部是 Newton + LU）
-    std::cout << "\nRunning DC operating point (dcSolveLU)...\n";
+    // ===== DC 工作点 =====
+    std::cout << "\nRunning DC operating point...\n";
 
     Eigen::VectorXd xdc;
     try {
-        xdc = dcSolveLU(ckt);
+        xdc = computeDcOperatingPoint(ckt);
     } catch (const std::exception& e) {
-        std::cerr << "dcSolveLU threw exception: " << e.what() << "\n";
+        std::cerr << "DC solve failed: " << e.what() << "\n";
         return 1;
     }
 
-    if (!xdc.allFinite()) {
-        std::cerr << "DC solution contains NaN/Inf, very likely non-convergent.\n";
-        std::cerr << "Raw xdc:\n" << xdc << "\n";
+    if (xdc.size() != ckt.numUnknowns()) {
+        std::cerr << "DC solution size mismatch.\n";
         return 1;
     }
 
-    std::cout << "\n==== DC node voltages ====\n";
     std::cout << std::fixed << std::setprecision(6);
 
-    // 打印所有有方程号的节点电压
+    std::cout << "\n==== DC node voltages ====\n";
     for (const auto& node : ckt.nodes) {
         if (node.eqIndex >= 0) {
             double v = xdc(node.eqIndex);
             std::cout << "V(" << node.name << ") = " << v << " V"
                       << "   [eqIndex=" << node.eqIndex << "]\n";
         } else {
-            // 地节点
             std::cout << "V(" << node.name << ") = 0.000000 V   [GND]\n";
         }
     }
 
-    // 顺便把电压源 / 电感的支路电流也打印出来，方便 debug
     std::cout << "\n==== DC branch currents (voltage sources / inductors) ====\n";
-
     for (const auto& e : ckt.elements) {
         if (auto vs = std::dynamic_pointer_cast<VoltageSource>(e)) {
             int k = vs->getBranchEqIndex();
             double I = (k >= 0 && k < xdc.size()) ? xdc(k) : 0.0;
-            // 约定：电流方向是从正端节点流向负端（和 stamp 的定义一致）
             std::cout << "I(" << vs->getName()
-                      << ", from +" << ckt.nodes[vs->getNodeIds()[0]].name
-                      << " to -"   << ckt.nodes[vs->getNodeIds()[1]].name
+                      << ", +" << ckt.nodes[vs->getNodeIds()[0]].name
+                      << " -> -" << ckt.nodes[vs->getNodeIds()[1]].name
                       << ") = " << I << " A"
                       << "   [branchEq=" << k << "]\n";
         } else if (auto L = std::dynamic_pointer_cast<Inductor>(e)) {
@@ -96,5 +91,25 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "\nDC analysis finished.\n";
+
+    // ===== 瞬态仿真（如果 .TRAN 启用） =====
+    if (sim.tran.enabled) {
+        std::cout << "\nRunning transient analysis (Backward Euler)...\n";
+        std::cout << std::scientific << std::setprecision(6);
+        std::cout << "  .TRAN: tstep=" << sim.tran.tstep
+                  << ", tstop=" << sim.tran.tstop
+                  << ", tstart=" << sim.tran.tstart << "\n";
+        std::cout << "  output file: " << tranOutFile << "\n";
+
+        try {
+            runTransientAnalysisBackwardEuler(ckt, sim, tranOutFile);
+        } catch (const std::exception& e) {
+            std::cerr << "Transient failed: " << e.what() << "\n";
+            return 1;
+        }
+    } else {
+        std::cout << "\nNo .TRAN card; transient analysis skipped.\n";
+    }
+
     return 0;
 }
