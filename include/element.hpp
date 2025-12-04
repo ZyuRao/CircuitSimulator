@@ -146,6 +146,8 @@ public:
           isP(isPchannel),
           Vth(Vth_),
           K(K_) , lambda(lambda_), Cj0(Cj0_) {}
+    
+    double getCj0() const { return Cj0; }
 
     void stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
                const Circuit& ckt,
