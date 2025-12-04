@@ -428,6 +428,7 @@ AnalysisType NetlistParser::parseAnalysisTypeFromToken(
     if (t == "dc")   return AnalysisType::DC;
     if (t == "ac")   return AnalysisType::AC;
     if (t == "tran") return AnalysisType::TRAN;
+    if (t == "hb")   return AnalysisType::HB;
     return AnalysisType::NONE;
 }
 
@@ -454,6 +455,12 @@ void NetlistParser::parseDotCard(const Statement& st) {
         parsePrintCard(st);
     } else if (head == ".model") {
         parseModelCard(st);
+    } else if (head == ".hb") {
+        parseHbCard(st);
+    } else if (head == ".plotnv") {
+        parsePlotNvCard(st);
+    } else if (head == ".plotnc") {
+        parsePlotNcCard(st);
     } else {
         std::cerr << "Line " << st.lineNo
                   << ": unsupported control card: " << st.raw << "\n";
@@ -541,6 +548,29 @@ void NetlistParser::parseAcCard(const Statement& st) {
     sim.ac = cfg;
 }
 
+void NetlistParser::parseHbCard(const Statement& st) {
+    const auto& t = st.tokens;
+    if (t.size() < 3) {
+        std::cerr << "Line " << st.lineNo
+                  << ": invalid .hb syntax: " << st.raw << "\n";
+        return;
+    }
+
+    HbConfig cfg;
+    try {
+        cfg.f0 = parseSpiceNumber(t[1]);
+        cfg.nHarm = std::stoi(t[2]);
+    } catch(const std::exception& e) {
+        std::cerr << "Line " << st.lineNo
+                  << ": cannot parse .hb arguments: " << e.what()
+                  << " in '" << st.raw << "'\n";
+        return;
+    }
+
+    cfg.enabled = true;
+    sim.hb = cfg;
+}
+
 //.PRINT解析
 
 ProbeSpec NetlistParser::parseProbeToken(const std::string& token) const {
@@ -619,6 +649,77 @@ void NetlistParser::parsePrintCard(const Statement& st) {
     }
 
     sim.printCommands.push_back(std::move(pc));
+}
+
+void NetlistParser::parsePlotNvCard(const Statement& st) {
+    const auto& t = st.tokens;
+    if (t.size() < 2) {
+        std::cerr << "Line " << st.lineNo
+                  << ": invalid .PLOTNV: " << st.raw << "\n";
+        return;
+    }
+    PrintCommand pc;
+    pc.analysis = AnalysisType::NONE;//不绑定分析类型
+
+    for(std::size_t i = 1; i < t.size(); i++) {
+        const std::string& nodeName = t[i];
+        if(nodeName.empty()) continue;
+
+        ProbeSpec p = parseProbeToken("V(" + nodeName + ")");
+        pc.probes.push_back(std::move(p));
+    }
+
+    if(!pc.probes.empty()) sim.printCommands.push_back(std::move(pc));
+}
+
+void NetlistParser::parsePlotNcCard(const Statement& st) {
+    const auto& t = st.tokens;
+    if (t.size() < 2) {
+        std::cerr << "Line " << st.lineNo
+                  << ": invalid .PLOTNC: " << st.raw << "\n";
+        return;
+    }
+
+    PrintCommand pc;
+    pc.analysis = AnalysisType::NONE; 
+
+    auto findParen = [](const std::string& s) -> std::pair<int, int> {
+        int l = -1, r = -1;
+        for (int i = 0; i < (int)s.size(); ++i) {
+            if (s[i] == '(' && l == -1) l = i;
+            if (s[i] == ')') r = i;
+        }
+        return {l, r};
+    };
+    for(std::size_t i = 1; i < t.size(); ++i) {
+        const std::string& tok = t[i];
+        if(tok.empty()) continue;
+
+        ProbeSpec p;
+        p.kind = ProbeKind::BranchCurrent;
+        p.expr = tok;
+
+        auto lr = findParen(tok);
+        if(lr.first < 0) {
+            //没有括号
+            p.eleName = tok;
+            p.elePort.clear();
+        } else {
+            // 形如 "M1(d)" / "R1(-)" / "V1(+)" / "I1(+)"
+            std::string name  = tok.substr(0, lr.first);
+            std::string inside = tok.substr(lr.first + 1,
+                                            lr.second - lr.first - 1);
+
+            p.eleName = rtrimLocal(ltrim(name));
+            p.elePort = rtrimLocal(ltrim(inside));
+        }
+        pc.probes.push_back(std::move(p));
+
+    }
+
+    if(!pc.probes.empty()) {
+        sim.printCommands.push_back(std::move(pc));
+    }
 }
 
 void NetlistParser::parseModelCard(const Statement& st) {

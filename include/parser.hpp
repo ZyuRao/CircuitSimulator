@@ -56,7 +56,10 @@ private:
     void parseDcCard   (const Statement& st);
     void parseTranCard (const Statement& st);
     void parseAcCard   (const Statement& st);
+    void parseHbCard   (const Statement& st);
     void parsePrintCard(const Statement& st);
+    void parsePlotNvCard (const Statement& st);
+    void parsePlotNcCard(const Statement& st);
     void parseModelCard(const Statement& st);
 
 };
