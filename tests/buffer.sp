@@ -22,4 +22,5 @@ C3 118 0 1e-12
 .PLOTNV 101
 .PLOTNV 118
 
-.hb 10e6 30
+.TRAN 1e-9 300e-9
+.hb 1e-2 3

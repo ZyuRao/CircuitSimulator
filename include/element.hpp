@@ -95,6 +95,10 @@ class CapacitorElement : public Element {
 public:
     CapacitorElement(const std::string& n, int n1, int n2, double c)
         : Element(n, {n1, n2}), C(c) {}
+    
+    double getC(){
+        return C;
+    }
 
     void stamp(Eigen::MatrixXd& /*G*/, Eigen::VectorXd& /*I*/,
                const Circuit& /*ckt*/,
@@ -114,6 +118,9 @@ public:
 
     void setBranchEqIndex(int idx) { branchEqIndex = idx; }
     int  getBranchEqIndex() const { return branchEqIndex; }
+    double getL(){
+        return L;
+    }
 
     void stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
                const Circuit& ckt,
@@ -139,6 +146,8 @@ public:
           isP(isPchannel),
           Vth(Vth_),
           K(K_) , lambda(lambda_), Cj0(Cj0_) {}
+    
+    double getCj0() const { return Cj0; }
 
     void stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
                const Circuit& ckt,
