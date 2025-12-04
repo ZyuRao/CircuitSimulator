@@ -119,7 +119,7 @@ static VectorXd dcSolveNewtonLU(const Circuit& ckt) {
                 e->stamp(G, I, ckt, x, ctx);
             }
 
-            stampGlobalGmin(ckt, G, 1e-6);
+            stampGlobalGmin(ckt, G, 5e-7);
 
             // 解 G x_new = I
             VectorXd xNew = Solver::solveLinearSystemLU(G, I);

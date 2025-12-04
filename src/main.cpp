@@ -111,5 +111,19 @@ int main(int argc, char** argv) {
         std::cout << "\nNo .TRAN card; transient analysis skipped.\n";
     }
 
+    for (const auto& e : ckt.elements) {
+    if (auto vs = std::dynamic_pointer_cast<VoltageSource>(e)) {
+        const auto& spec = vs->getSpec();
+        std::cout << "Vsrc " << vs->getName()
+                  << " np=" << ckt.nodes[vs->getNodeIds()[0]].name
+                  << " nm=" << ckt.nodes[vs->getNodeIds()[1]].name
+                  << " dc=" << spec.dcValue
+                  << " sin.v0=" << spec.tran.sine.v0
+                  << " sin.va=" << spec.tran.sine.va
+                  << " sin.freq=" << spec.tran.sine.freq
+                  << "\n";
+    }
+}
+
     return 0;
 }
