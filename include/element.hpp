@@ -49,6 +49,8 @@ public:
                const Circuit& ckt,
                const Eigen::VectorXd& x,
                const AnalysisContext& ctx) const override;
+    void stampAC(Eigen::MatrixXcd& Y, Eigen::VectorXcd& J,
+                const Circuit& ckt, double omega) const override;
 };
 
 // 电流源 I（从 nodeIds[0] -> nodeIds[1]，值为 value）
@@ -106,6 +108,9 @@ public:
                const AnalysisContext& ctx) const override {
         // DC 中视为开路，不 stamp
     }
+
+    void stampAC(Eigen::MatrixXcd& Y, Eigen::VectorXcd& J,
+                 const Circuit& ckt, double omega) const override;
 };
 
 // 电感（DC 中视为 0V 电压源）
@@ -126,6 +131,8 @@ public:
                const Circuit& ckt,
                const Eigen::VectorXd& /*x*/,
                const AnalysisContext& ctx) const override;
+    void stampAC(Eigen::MatrixXcd& Y, Eigen::VectorXcd& J,
+                const Circuit& ckt, double omega) const override;
 };
 
 
@@ -153,6 +160,11 @@ public:
                const Circuit& ckt,
                const Eigen::VectorXd& x,
                const AnalysisContext& ctx) const override;
+    void stampNonlinearConductance(Eigen::MatrixXd& Gnl,
+                                   const Circuit& ckt,
+                                   const Eigen::VectorXd& nodeVoltages) const;
+    void evalIdsGmGds(const Circuit& ckt, const Eigen::VectorXd& nodeVoltages,
+                        double& Ids, double& gm, double& gds) const;
 };
 
 class NMosElement : public MosfetBase {

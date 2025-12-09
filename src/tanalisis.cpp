@@ -7,60 +7,35 @@
 #include <unordered_map>
 #include <cmath>
 
+#include "analysis.hpp"
 #include "circuit.hpp"
 #include "element.hpp"
 #include "sim.hpp"
 #include "solver.hpp"
-#include "dcanalysis.hpp"
+#include "utils.hpp"
 
 using Eigen::MatrixXd;
 using Eigen::VectorXd;
 
-// ========= 小工具：取节点电压 =========
-static double getNodeVoltage(const Circuit& ckt,
-                             const VectorXd& x,
-                             int nodeId)
-{
-    int eq = ckt.nodes[nodeId].eqIndex;
-    if (eq >= 0 && eq < x.size()) return x(eq);
-    return 0.0;
+
+TransientAnalysis::TransientAnalysis(const Circuit& ckt_,
+                                     const SimulationConfig& sim_,
+                                     const std::string& outFile_)
+    : ckt(ckt_), sim(sim_), outFile(outFile_) {}
+
+VectorXd TransientAnalysis::computeDcOperatingPoint() const {
+    DcAnalysis dc(ckt, sim, DcSolverKind::GaussSeidel); // 或LU
+    return dc.run();
 }
 
-// ========= 小工具：全局 gmin-to-ground =========
-static void stampGlobalGmin(const Circuit& ckt,
-                            MatrixXd& G,
-                            double gmin)
-{
-    int N = G.rows();
-    for (const auto& node : ckt.nodes) {
-        int eq = node.eqIndex;
-        if (eq >= 0 && eq < N) {
-            G(eq, eq) += gmin;
-        }
-    }
-}
-
-// ========= 对外：求 DC 工作点 =========
-VectorXd computeDcOperatingPoint(const Circuit& ckt)
-{
-    return dcSolve(ckt);
-}
-
-// MOS 寄生电容状态：上一时刻的电压差
-struct MosCapState {
-    double vgsPrev = 0.0;
-    double vgdPrev = 0.0;
-    double vsbPrev = 0.0;
-    double vdbPrev = 0.0;
-};
 
 // 在 G / I 中 stamp 一个“电容 + 历史电流源”
 // C 接在 eq1 与 eq2 之间，vPrev = V(eq1)^n - V(eq2)^n
-static void stampCapBE(int eq1, int eq2,
-                       double C, double dt,
-                       double vPrev,
-                       MatrixXd& G,
-                       VectorXd& I)
+void TransientAnalysis::stampCapBE(int eq1, int eq2,
+                                   double C, double dt,
+                                   double vPrev,
+                                   MatrixXd& G,
+                                   VectorXd& I)
 {
     if (C <= 0.0 || dt <= 0.0) return;
 
@@ -79,11 +54,9 @@ static void stampCapBE(int eq1, int eq2,
     if (eq2 >= 0) I(eq2) += I_hist;
 }
 
+
 // ========= 主函数：后向欧拉瞬态 + MOS 寄生电容 =========
-void runTransientAnalysisBackwardEuler(const Circuit& ckt,
-                                       const SimulationConfig& sim,
-                                       const std::string& outFile)
-{
+void TransientAnalysis::runBackwardEuler() {
     const TranConfig& cfg = sim.tran;
 
     if (!cfg.enabled) {
@@ -109,7 +82,7 @@ void runTransientAnalysisBackwardEuler(const Circuit& ckt,
     // ===== 0. 先求 DC 工作点，作为 t=0 初值 =====
     VectorXd xdc;
     try {
-        xdc = computeDcOperatingPoint(ckt);
+        xdc = computeDcOperatingPoint();
     } catch (const std::exception& e) {
         std::cerr << "DC operating point failed: " << e.what() << "\n";
         return;
@@ -331,9 +304,7 @@ void runTransientAnalysisBackwardEuler(const Circuit& ckt,
                 int eqS = ckt.nodes[nS].eqIndex;
                 int eqB = ckt.nodes[nB].eqIndex;
 
-                // 目前简单实现：用 Cj0 近似构造 Cgs/Cgd/Cs/Cd
-                // 你可以在 MosfetBase 里加 Cox、W、L 等，把这里改成课件中的：
-                // Cgs = 0.5 * Cox * W * L, Cgd 同理，Cs=Cd=Cj0
+                // 简单实现：用 Cj0 近似构造 Cgs/Cgd/Cs/Cd
                 double Cj0 = m->getCj0();
                 double Cgs = 0.5 * Cj0;
                 double Cgd = 0.5 * Cj0;
@@ -422,3 +393,4 @@ void runTransientAnalysisBackwardEuler(const Circuit& ckt,
     std::cout << "Transient analysis (Backward Euler) finished. "
               << "Results written to '" << outFile << "'.\n";
 }
+

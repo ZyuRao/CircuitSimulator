@@ -305,3 +305,220 @@ void MosfetBase::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
 
     // Gate / Bulk 节点理想 DC 不导通，这里不对其 KCL stamp（即 Ig=Ib=0）
 }
+
+void Resistor::stampAC(Eigen::MatrixXcd& Y, Eigen::VectorXcd& J,
+                       const Circuit& ckt, double /*omega*/) const {
+    (void)J;
+    int n1 = nodeIds[0];
+    int n2 = nodeIds[1];
+    int eq1 = ckt.nodes[n1].eqIndex;
+    int eq2 = ckt.nodes[n2].eqIndex;
+
+    if (R <= 0.0) {
+        std::cerr << "Warning: resistor " << name << " has non-positive R in AC.\n";
+        return;
+    }
+    std::complex<double> g(1.0 / R, 0.0);
+
+    if (eq1 >= 0) Y(eq1, eq1) += g;
+    if (eq2 >= 0) Y(eq2, eq2) += g;
+    if (eq1 >= 0 && eq2 >= 0) {
+        Y(eq1, eq2) -= g;
+        Y(eq2, eq1) -= g;
+    }
+} 
+
+void CapacitorElement::stampAC(Eigen::MatrixXcd& Y, Eigen::VectorXcd& J,
+                               const Circuit& ckt, double omega) const 
+{
+    (void) J;
+    int n1 = nodeIds[0];
+    int n2 = nodeIds[1];
+    int eq1 = ckt.nodes[n1].eqIndex;
+    int eq2 = ckt.nodes[n2].eqIndex;
+
+    if (C <= 0.0) {
+        return; // 0 电容，忽略
+    }
+    // DC (omega=0) 时，电容在 AC 中也视为开路
+    if (omega == 0.0) {
+        return;
+    }
+
+    std::complex<double> y(0.0, omega * C);
+    if (eq1 >= 0) Y(eq1, eq1) += y;
+    if (eq2 >= 0) Y(eq2, eq2) += y;
+    if (eq1 >= 0 && eq2 >= 0) {
+        Y(eq1, eq2) -= y;
+        Y(eq2, eq1) -= y;
+    }
+}
+
+void Inductor::stampAC(Eigen::MatrixXcd& Y, Eigen::VectorXcd& J,
+                       const Circuit& ckt, double omega) const
+{
+    (void) J;
+    int np = nodeIds[0];
+    int nm = nodeIds[1];
+    int eqP = ckt.nodes[np].eqIndex;
+    int eqM = ckt.nodes[nm].eqIndex;
+    int k   = branchEqIndex;
+
+    if (k < 0 || k >= Y.rows()) {
+        std::cerr << "Internal error: invalid branchEqIndex for inductor "
+                    << name << " in AC.\n";
+        return;
+    }
+
+    std::complex<double> z(0.0, omega * L);
+
+
+    if (eqP >= 0) Y(eqP, k) += std::complex<double>(1.0, 0.0);
+    if (eqM >= 0) Y(eqM, k) -= std::complex<double>(1.0, 0.0);
+
+    // 支路方程：V(p) - V(m) - jωL * I_L = 0
+    if (eqP >= 0) Y(k, eqP) += std::complex<double>(1.0, 0.0);
+    if (eqM >= 0) Y(k, eqM) -= std::complex<double>(1.0, 0.0);
+
+    Y(k, k) += -z;
+}
+
+void MosfetBase::evalIdsGmGds(
+    const Circuit& ckt, 
+    const Eigen::VectorXd& nodeVoltages,
+    double& Ids, double& gm, double& gds
+) const {
+    int nD = nodeIds[0];
+    int nG = nodeIds[1];
+    int nS = nodeIds[2];
+    int nB = nodeIds.size() > 3 ? nodeIds[3] : nodeIds[2];
+
+    int eqD = ckt.nodes[nD].eqIndex;
+    int eqG = ckt.nodes[nG].eqIndex;
+    int eqS = ckt.nodes[nS].eqIndex;
+    int eqB = ckt.nodes[nB].eqIndex;
+    (void)eqB;
+    auto getV = [&](int eq) -> double {
+        if (eq < 0 || eq >= nodeVoltages.size()) return 0.0;
+        return nodeVoltages(eq);
+    };
+
+    double Vd = getV(eqD);
+    double Vg = getV(eqG);
+    double Vs = getV(eqS);
+    double Vb = getV(eqB);
+
+    double Vgs = Vg - Vs;
+    double Vds = Vd - Vs;
+    double Vbs = Vb - Vs;
+    double Vth_eff = Vth;
+
+    double Vov = Vgs - Vth_eff; // overdrive
+    Ids = 0.0;
+    gm  = 0.0;
+    gds = 0.0;
+
+    if (!isP) {
+        // NMOS
+        if (Vov <= 0.0) {
+            // 截止区：近似为 0
+            Ids = 0.0;
+            gm  = 0.0;
+            gds = 0.0;
+            return;
+        }
+
+        if (Vds < Vov) {
+            // Triode
+            Ids = K * (Vov * Vds - 0.5 * Vds * Vds);
+            gm  = K * Vds;
+            gds = K * (Vov - Vds);
+        } else {
+            // Saturation
+            Ids = 0.5 * K * Vov * Vov;
+            gm  = K * Vov;
+            gds = 0.0;
+        }
+        // channel-length modulation
+        double lamFactor = 1.0 + lambda * Vds;
+        Ids *= lamFactor;
+        gds  = gds * lamFactor + lambda * Ids;
+    } else {
+        // PMOS：用等效 NMOS 模型，变量变换 Vsg, Vsd
+        double Vsg = -(Vgs); // = Vs - Vg
+        double Vsd = -(Vds); // = Vs - Vd
+        double Vov_p = Vsg - Vth_eff;
+
+        if (Vov_p <= 0.0) {
+            Ids = 0.0;
+            gm  = 0.0;
+            gds = 0.0;
+            return;
+        }
+
+        if (Vsd < Vov_p) {
+            double Id_abs = K * (Vov_p * Vsd - 0.5 * Vsd * Vsd);
+            double gm_abs = K * Vsd;
+            double gds_abs= K * (Vov_p - Vsd);
+            double lamFactor = 1.0 + lambda * Vsd;
+            Id_abs *= lamFactor;
+            gds_abs = gds_abs * lamFactor + lambda * Id_abs;
+
+            // 转回 D->S 方向：Ids = -Id_abs
+            Ids = -Id_abs;
+            gm  = -gm_abs;   // ∂Ids/∂Vgs
+            gds = -gds_abs;  // ∂Ids/∂Vds
+        } else {
+            double Id_abs = 0.5 * K * Vov_p * Vov_p;
+            double gm_abs = K * Vov_p;
+            double gds_abs= 0.0;
+            double lamFactor = 1.0 + lambda * Vsd;
+            Id_abs *= lamFactor;
+            gds_abs = gds_abs * lamFactor + lambda * Id_abs;
+
+            Ids = -Id_abs;
+            gm  = -gm_abs;
+            gds = -gds_abs;
+        }
+    }
+}
+
+void MosfetBase::stampNonlinearConductance(
+    Eigen::MatrixXd& Gnl,
+    const Circuit& ckt,
+    const Eigen::VectorXd& nodeVoltages
+) const {
+    double Ids, gm, gds;
+    evalIdsGmGds(ckt, nodeVoltages, Ids, gm, gds);
+
+    int nD = nodeIds[0];
+    int nG = nodeIds[1];
+    int nS = nodeIds[2];
+    int nB = nodeIds.size() > 3 ? nodeIds[3] : nodeIds[2];
+
+    int eqD = ckt.nodes[nD].eqIndex;
+    int eqG = ckt.nodes[nG].eqIndex;
+    int eqS = ckt.nodes[nS].eqIndex;
+    int eqB = ckt.nodes[nB].eqIndex;
+
+    auto add = [&](int r, int c, double val) {
+        if (r >= 0 && r < Gnl.rows() && c >= 0 && c < Gnl.cols()) {
+            Gnl(r, c) += val;
+        }
+    };
+
+     // 对 vD 的导数
+    add(eqD, eqD,  gds);          // ∂I_D/∂vD
+    add(eqS, eqD, -gds);          // ∂I_S/∂vD
+
+    // 对 vG 的导数
+    add(eqD, eqG,  gm);           // ∂I_D/∂vG
+    add(eqS, eqG, -gm);           // ∂I_S/∂vG
+
+    // 对 vS 的导数
+    double dId_dvS = -gm - gds;
+    add(eqD, eqS,  dId_dvS);      // ∂I_D/∂vS
+    add(eqS, eqS, -dId_dvS);      // ∂I_S/∂vS
+
+    (void)eqB;
+}

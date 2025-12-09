@@ -5,12 +5,11 @@
 #include <string>
 #include <memory>
 
+#include "analysis.hpp"
 #include "parser.hpp"
 #include "circuit.hpp"
-#include "dcanalysis.hpp"
 #include "sim.hpp"
 #include "element.hpp"
-#include "tanalisis.hpp"
 
 int main(int argc, char** argv) {
     if (argc < 2) {
