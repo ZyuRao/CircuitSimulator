@@ -89,6 +89,8 @@ public:
                       const std::string& outFile = "tran_out.csv");
 
     void runBackwardEuler();
+
+    void runTrapezoidal();
 private:
     const Circuit& ckt;
     const SimulationConfig& sim;
@@ -110,6 +112,12 @@ private:
     static void stampCapBE(int eq1, int eq2,
                            double C, double dt,
                            double vPrev,
+                           Eigen::MatrixXd& G,
+                           Eigen::VectorXd& I);
+    // 梯形法的“电容 + 历史电流源”等效 stamp（Norton 等效）
+    static void stampCapTR(int eq1, int eq2,
+                           double C, double dt,
+                           double vPrev, double iPrev,
                            Eigen::MatrixXd& G,
                            Eigen::VectorXd& I);
 };
@@ -165,7 +173,7 @@ private:
                        CVector& Jk) const;
 
     // --- 残差 F(X) ---
-     void computeResidualAndTimeDomainJacobian(
+    void computeResidualAndTimeDomainJacobian(
         const Eigen::VectorXd& x, double gmin,
         Eigen::VectorXd& F,
         std::vector<Eigen::MatrixXd>& Gnl_t_vec) const;

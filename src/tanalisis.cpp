@@ -56,7 +56,7 @@ void TransientAnalysis::stampCapBE(int eq1, int eq2,
 
 // 梯形法版本的电容伴随模型
 // C 接在 eq1 与 eq2 之间，vPrev = V(eq1)^n - V(eq2)^n，iPrev 为上一步从 eq1->eq2 的电流
-static void stampCapTR(int eq1, int eq2,
+void TransientAnalysis::stampCapTR(int eq1, int eq2,
                        double C, double dt,
                        double vPrev, double iPrev,
                        MatrixXd& G, VectorXd& I)
@@ -422,10 +422,7 @@ void TransientAnalysis::runBackwardEuler() {
 }
 
 // ========= 梯形法瞬态（Trapezoidal Rule） =========
-void runTransientAnalysisTrapezoidal(const Circuit& ckt,
-                                     const SimulationConfig& sim,
-                                     const std::string& outFile)
-{
+void TransientAnalysis::runTrapezoidal(){
     const TranConfig& cfg = sim.tran;
 
     if (!cfg.enabled) {
@@ -448,10 +445,10 @@ void runTransientAnalysisTrapezoidal(const Circuit& ckt,
         return;
     }
 
-    // ===== 0. DC 工作点作为 t=0 初值（用你现在的 dcSolveLU） =====
+    // ===== 0. DC 工作点作为 t=0 初值 =====
     VectorXd xdc;
     try {
-        xdc = computeDcOperatingPoint(ckt);
+        xdc = computeDcOperatingPoint();
     } catch (const std::exception& e) {
         std::cerr << "DC operating point failed: " << e.what() << "\n";
         return;
@@ -476,7 +473,7 @@ void runTransientAnalysisTrapezoidal(const Circuit& ckt,
         }
     }
 
-    // 电容：上一时刻电压/电流
+    // 电容：上一时刻电压/电流（TR 需要记 i^n）
     struct CapTrapState {
         double vPrev = 0.0;  // V(n1)-V(n2) at t^n
         double iPrev = 0.0;  // i 从 n1->n2, at t^n
@@ -598,13 +595,13 @@ void runTransientAnalysisTrapezoidal(const Circuit& ckt,
     int totalSteps = static_cast<int>(std::floor(tstop / dt + 1e-12));
     std::cout << "[TRAN-TR] total steps = " << totalSteps << "\n";
 
-    VectorXd x        = xdc;       // 当前解
-    VectorXd xPrevStep = xdc;      // 上一时间步的解（做线性预测可以用）
+    VectorXd x         = xdc;   // 当前解
+    VectorXd xPrevStep = xdc;   // 上一时间步的解（做线性预测用）
 
     dumpRow(0.0, xdc);
 
-    ConvController ctrl;           // 直接复用 DC 里的收敛控制器 :contentReference[oaicite:2]{index=2}
-    const double tol = 1e-6;
+    ConvController ctrl;           // 复用 DC 里的收敛控制器
+    const double tol          = 1e-6;
     const int    maxNewtonIters = 60;
 
     for (int step = 0; step < totalSteps; ++step) {
@@ -680,7 +677,7 @@ void runTransientAnalysisTrapezoidal(const Circuit& ckt,
 
                 double R_eq  = 2.0 * Lval / dt;
                 // 正确的历史等效：v^{n+1} - R_eq * i^{n+1} = -R_eq * i^n - v^n
-                double V_hist = -R_eq * iPrev - vPrev;  // ★ 注意这里号和旧版本不同
+                double V_hist = -R_eq * iPrev - vPrev;
 
                 // KCL：节点电流 = I_L
                 if (eqP >= 0) G(eqP, k) += 1.0;
@@ -735,7 +732,7 @@ void runTransientAnalysisTrapezoidal(const Circuit& ckt,
                 continue;
             }
 
-            // 8) 用 ConvController 更新 alpha/gmin 和 x（和 DC 一样）
+            // 8) 用 ConvController 更新 alpha / gmin 和 x（和 DC 一样）
             auto st = ctrl.update(
                 x, xRaw, prevErr, iter,
                 alpha, gmin, 1.0,  // rampScale = 1.0
