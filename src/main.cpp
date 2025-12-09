@@ -1,4 +1,8 @@
 // main.cpp -- DC 工作点 + 瞬态仿真（后向欧拉）
+// g++ -std=c++17 -O2 src\*.cpp -I include -I E:\eigen-5.0.0 -o sim.exe
+// .\sim tests\dbmixer.sp
+// python plot_tran.py tran_out.csv 'V(164)' 'V(113)'
+
 
 #include <iostream>
 #include <iomanip>
@@ -101,7 +105,7 @@ int main(int argc, char** argv) {
         std::cout << "  output file: " << tranOutFile << "\n";
 
         try {
-            runTransientAnalysisBackwardEuler(ckt, sim, tranOutFile);
+            runTransientAnalysisTrapezoidal(ckt, sim, tranOutFile);
         } catch (const std::exception& e) {
             std::cerr << "Transient failed: " << e.what() << "\n";
             return 1;
@@ -109,6 +113,20 @@ int main(int argc, char** argv) {
     } else {
         std::cout << "\nNo .TRAN card; transient analysis skipped.\n";
     }
+
+    for (const auto& e : ckt.elements) {
+    if (auto vs = std::dynamic_pointer_cast<VoltageSource>(e)) {
+        const auto& spec = vs->getSpec();
+        std::cout << "Vsrc " << vs->getName()
+                  << " np=" << ckt.nodes[vs->getNodeIds()[0]].name
+                  << " nm=" << ckt.nodes[vs->getNodeIds()[1]].name
+                  << " dc=" << spec.dcValue
+                  << " sin.v0=" << spec.tran.sine.v0
+                  << " sin.va=" << spec.tran.sine.va
+                  << " sin.freq=" << spec.tran.sine.freq
+                  << "\n";
+    }
+}
 
     return 0;
 }
