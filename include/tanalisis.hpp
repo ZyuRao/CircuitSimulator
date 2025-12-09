@@ -15,3 +15,7 @@ Eigen::VectorXd computeDcOperatingPoint(const Circuit& ckt);
 void runTransientAnalysisBackwardEuler(const Circuit& ckt,
                                        const SimulationConfig& sim,
                                        const std::string& outFile);
+
+void runTransientAnalysisTrapezoidal(const Circuit& ckt,
+                                     const SimulationConfig& sim,
+                                     const std::string& outFile);
