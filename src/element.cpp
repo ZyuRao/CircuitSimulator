@@ -243,12 +243,12 @@ void MosfetBase::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
     }
 
     {
-        const double gmin = 1e-9;
-       if(!on) {
-            Ids0 = 0.0;
-            gm0 = 0.0;
-            gds0 = gmin;
-       }
+        const double gmin = 1e-12;
+        if(!on) {
+                Ids0 = 0.0;
+                gm0 = 0.0;
+                gds0 = gmin;
+        }
     }
 
     // 统一加上沟道长度调制：Ids = Ids0 * (1 + λVds)
