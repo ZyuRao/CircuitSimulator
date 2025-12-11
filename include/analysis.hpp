@@ -91,6 +91,14 @@ public:
     void runBackwardEuler();
 
     void runTrapezoidal();
+
+    Eigen::VectorXd integrateOnePeriodBE(
+        const Eigen::VectorXd& x0,
+        double t0,
+        double dt,
+        double T,
+        const std::function<void(double, const Eigen::VectorXd&)>& dumpRow = nullptr
+    );
 private:
     const Circuit& ckt;
     const SimulationConfig& sim;
@@ -244,3 +252,27 @@ inline static void stampGlobalGmin(const Circuit& ckt,
         }
     }
 }
+
+// Shooting PSS 配置结构体
+struct ShootingPssConfig {
+    double periodT = 1e-6;   // 周期 T
+    double tstep   = 1e-9;   // 时间步长 Δt
+    int    maxIters = 50;    // Shooting 外层最大迭代次数
+    double tol      = 1e-6;  // 收敛阈值 ||x(T) - x(0)||
+    double relax    = 0.5;   // 松弛因子 x0_{k+1} = x0_k + relax * (xT - x0_k)
+};
+
+// Shooting 方法主分析入口
+void runPssShootingAnalysis(const Circuit& ckt,
+                            const SimulationConfig& sim,
+                            const ShootingPssConfig& cfg,
+                            const std::string& outFile);
+
+// 积分一个周期 T（后向欧拉），并可选输出每步结果
+Eigen::VectorXd integrateOnePeriodPssBE(
+    const Circuit& ckt,
+    const SimulationConfig& sim,
+    double dt, double T,
+    const Eigen::VectorXd& x0,
+    const std::function<void(double, const Eigen::VectorXd&)>& dumpRow
+);

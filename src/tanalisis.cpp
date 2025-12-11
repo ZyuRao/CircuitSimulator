@@ -733,7 +733,7 @@ void TransientAnalysis::runTrapezoidal(){
             }
 
             // 8) 用 ConvController 更新 alpha / gmin 和 x（和 DC 一样）
-            auto st = ctrl.update(
+             auto st = ctrl.update(
                 x, xRaw, prevErr, iter,
                 alpha, gmin, 1.0,  // rampScale = 1.0
                 tol
@@ -833,4 +833,270 @@ void TransientAnalysis::runTrapezoidal(){
 
     std::cout << "Transient analysis (Trapezoidal + ConvController) finished. "
               << "Results written to '" << outFile << "'.\n";
+}
+
+// ========= 后向欧拉单周期积分（用于周期性稳态分析） =========
+// 从给定初值 x0 出发，用后向欧拉在 [t0, t0+T] 上积分，
+// 完全复用 runBackwardEuler 的 stamp 逻辑（C/L/MOS + gmin）。
+// dumpRow 可选，用于在每个时间点输出波形；返回末态 x(t0+T)。
+VectorXd TransientAnalysis::integrateOnePeriodBE(
+    const VectorXd& x0,
+    double t0,
+    double dt,
+    double T,
+    const std::function<void(double, const VectorXd&)>& dumpRow)
+{
+    const int N = ckt.numUnknowns();
+    if (N <= 0) {
+        throw std::runtime_error("Transient(BE-Period): circuit has no unknowns.");
+    }
+    if (x0.size() != N) {
+        throw std::runtime_error("Transient(BE-Period): x0 size mismatch.");
+    }
+    if (dt <= 0.0 || T <= 0.0) {
+        throw std::runtime_error("Transient(BE-Period): dt and T must be > 0.");
+    }
+
+    // 步数检查
+    double stepsDouble = T / dt;
+    if (!std::isfinite(stepsDouble) || stepsDouble <= 0.0) {
+        throw std::runtime_error("Transient(BE-Period): invalid T/dt.");
+    }
+    int nSteps = static_cast<int>(std::floor(stepsDouble + 1e-12));
+    if (nSteps <= 0) {
+        throw std::runtime_error("Transient(BE-Period): T/dt too small, no steps.");
+    }
+
+    // ===== 1. 收集 C / L / MOS 元件，并用 x0 建立初始状态 =====
+    std::vector<std::shared_ptr<CapacitorElement>> caps;
+    std::vector<std::shared_ptr<Inductor>>        inds;
+    std::vector<std::shared_ptr<MosfetBase>>      mosfets;
+
+    for (const auto& e : ckt.elements) {
+        if (auto c = std::dynamic_pointer_cast<CapacitorElement>(e)) {
+            caps.push_back(c);
+        } else if (auto L = std::dynamic_pointer_cast<Inductor>(e)) {
+            inds.push_back(L);
+        } else if (auto m = std::dynamic_pointer_cast<MosfetBase>(e)) {
+            mosfets.push_back(m);
+        }
+    }
+
+    // 显式电容：v^0 = V(n1)-V(n2)，从 x0 初始化
+    std::unordered_map<const CapacitorElement*, double> capVprev;
+    for (auto& c : caps) {
+        const auto& nodes = c->getNodeIds();
+        int n1 = nodes[0];
+        int n2 = nodes[1];
+        double v1 = getNodeVoltage(ckt, x0, n1);
+        double v2 = getNodeVoltage(ckt, x0, n2);
+        capVprev[c.get()] = v1 - v2;
+    }
+
+    // 电感：i_L^0 = x0 里的支路电流
+    std::unordered_map<const Inductor*, double> indIprev;
+    for (auto& L : inds) {
+        int k = L->getBranchEqIndex();
+        double i0 = 0.0;
+        if (k >= 0 && k < x0.size()) {
+            i0 = x0(k);
+        }
+        indIprev[L.get()] = i0;
+    }
+
+    // MOS 寄生电容状态：从 x0 初始化
+    std::unordered_map<const MosfetBase*, MosCapState> mosPrev;
+    for (auto& m : mosfets) {
+        const auto& nodes = m->getNodeIds();
+        int nD = nodes[0];
+        int nG = nodes[1];
+        int nS = nodes[2];
+        int nB = (nodes.size() > 3) ? nodes[3] : nodes[2];
+
+        double vD = getNodeVoltage(ckt, x0, nD);
+        double vG = getNodeVoltage(ckt, x0, nG);
+        double vS = getNodeVoltage(ckt, x0, nS);
+        double vB = getNodeVoltage(ckt, x0, nB);
+
+        MosCapState st;
+        st.vgsPrev = vG - vS;
+        st.vgdPrev = vG - vD;
+        st.vsbPrev = vS - vB;
+        st.vdbPrev = vD - vB;
+        mosPrev[m.get()] = st;
+    }
+
+    // ===== 2. 主时间步循环（完全照 runBackwardEuler，只是初值换成 x0，不写文件） =====
+    const int    maxNewtonIters = 50;
+    const double tol            = 1e-6;
+    const double gmin           = 1e-6;
+    const double alpha          = 0.45;
+
+    MatrixXd G(N, N);
+    VectorXd I(N);
+
+    VectorXd x = x0;
+
+    // t = t0 的一行（如果需要输出）
+    if (dumpRow) {
+        dumpRow(t0, x);
+    }
+
+    for (int step = 0; step < nSteps; ++step) {
+        double tNow = t0 + (step + 1) * dt;
+
+        for (int iter = 0; iter < maxNewtonIters; ++iter) {
+            G.setZero();
+            I.setZero();
+
+            AnalysisContext ctx;
+            ctx.type        = AnalysisType::TRAN;
+            ctx.sourceScale = 1.0;
+            ctx.time        = tNow;
+            ctx.omega       = 0.0;
+
+            // 1) 非 C / 非 L / 非 MOS 元件
+            for (const auto& e : ckt.elements) {
+                if (std::dynamic_pointer_cast<CapacitorElement>(e)) continue;
+                if (std::dynamic_pointer_cast<Inductor>(e))        continue;
+                if (std::dynamic_pointer_cast<MosfetBase>(e))      continue;
+                e->stamp(G, I, ckt, x, ctx);
+            }
+
+            // 2) MOS 导电部分
+            for (const auto& m : mosfets) {
+                m->stamp(G, I, ckt, x, ctx);
+            }
+
+            // 3) 显式电容（后向欧拉）
+            for (const auto& c : caps) {
+                double Cval = c->getC();
+                const auto& nodes = c->getNodeIds();
+                int n1 = nodes[0];
+                int n2 = nodes[1];
+                int eq1 = ckt.nodes[n1].eqIndex;
+                int eq2 = ckt.nodes[n2].eqIndex;
+                double vPrev = capVprev[c.get()];
+                stampCapBE(eq1, eq2, Cval, dt, vPrev, G, I);
+            }
+
+            // 4) 电感（后向欧拉 Thévenin）
+            for (const auto& L : inds) {
+                double Lval = L->getL();
+                if (Lval <= 0.0) continue;
+
+                const auto& nodes = L->getNodeIds();
+                int np = nodes[0];
+                int nm = nodes[1];
+                int eqP = ckt.nodes[np].eqIndex;
+                int eqM = ckt.nodes[nm].eqIndex;
+                int k   = L->getBranchEqIndex();
+                if (k < 0 || k >= N) continue;
+
+                double R_eq  = Lval / dt;
+                double iPrev = indIprev[L.get()];
+                double V_hist = -R_eq * iPrev;
+
+                if (eqP >= 0) G(eqP, k) += 1.0;
+                if (eqM >= 0) G(eqM, k) -= 1.0;
+
+                if (eqP >= 0) G(k, eqP) += 1.0;
+                if (eqM >= 0) G(k, eqM) -= 1.0;
+                G(k, k) += -R_eq;
+                I(k)    += V_hist;
+            }
+
+            // 5) MOS 寄生电容（用 Cj0 粗略近似）
+            for (const auto& m : mosfets) {
+                const auto& nodes = m->getNodeIds();
+                int nD = nodes[0];
+                int nG = nodes[1];
+                int nS = nodes[2];
+                int nB = (nodes.size() > 3) ? nodes[3] : nodes[2];
+
+                int eqD = ckt.nodes[nD].eqIndex;
+                int eqG = ckt.nodes[nG].eqIndex;
+                int eqS = ckt.nodes[nS].eqIndex;
+                int eqB = ckt.nodes[nB].eqIndex;
+
+                double Cj0 = m->getCj0();
+                double Cgs = 0.5 * Cj0;
+                double Cgd = 0.5 * Cj0;
+                double CsJ = Cj0;
+                double CdJ = Cj0;
+
+                const MosCapState& stPrev = mosPrev[m.get()];
+
+                stampCapBE(eqG, eqS, Cgs, dt, stPrev.vgsPrev, G, I);
+                stampCapBE(eqG, eqD, Cgd, dt, stPrev.vgdPrev, G, I);
+                stampCapBE(eqS, eqB, CsJ, dt, stPrev.vsbPrev, G, I);
+                stampCapBE(eqD, eqB, CdJ, dt, stPrev.vdbPrev, G, I);
+            }
+
+            // 6) gmin 到地
+            stampGlobalGmin(ckt, G, gmin);
+
+            // 7) 解线性方程 + 简单阻尼
+            VectorXd xNew = Solver::solveLinearSystemLU(G, I);
+            if (!xNew.allFinite()) {
+                throw std::runtime_error("Transient(BE-Period): LU produced NaN/Inf.");
+            }
+
+            xNew = x + alpha * (xNew - x);
+            double err = (xNew - x).norm();
+            x = xNew;
+
+            if (err < tol) {
+                break;
+            }
+            if (iter == maxNewtonIters - 1) {
+                std::cerr << "WARNING: BE-period Newton did not converge at t="
+                          << std::scientific << tNow
+                          << " (err=" << err << ")\n";
+            }
+        }
+
+        // ===== 3. 步进成功：更新电容 / 电感 / MOS 状态 =====
+        for (const auto& c : caps) {
+            const auto& nodes = c->getNodeIds();
+            int n1 = nodes[0];
+            int n2 = nodes[1];
+            double v1 = getNodeVoltage(ckt, x, n1);
+            double v2 = getNodeVoltage(ckt, x, n2);
+            capVprev[c.get()] = v1 - v2;
+        }
+        for (const auto& L : inds) {
+            int k = L->getBranchEqIndex();
+            double iL = 0.0;
+            if (k >= 0 && k < x.size()) {
+                iL = x(k);
+            }
+            indIprev[L.get()] = iL;
+        }
+        for (const auto& m : mosfets) {
+            const auto& nodes = m->getNodeIds();
+            int nD = nodes[0];
+            int nG = nodes[1];
+            int nS = nodes[2];
+            int nB = (nodes.size() > 3) ? nodes[3] : nodes[2];
+
+            double vD = getNodeVoltage(ckt, x, nD);
+            double vG = getNodeVoltage(ckt, x, nG);
+            double vS = getNodeVoltage(ckt, x, nS);
+            double vB = getNodeVoltage(ckt, x, nB);
+
+            MosCapState st;
+            st.vgsPrev = vG - vS;
+            st.vgdPrev = vG - vD;
+            st.vsbPrev = vS - vB;
+            st.vdbPrev = vD - vB;
+            mosPrev[m.get()] = st;
+        }
+
+        if (dumpRow) {
+            dumpRow(tNow, x);
+        }
+    }
+
+    return x;
 }
