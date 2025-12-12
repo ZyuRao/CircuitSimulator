@@ -5,6 +5,7 @@
 #include <iomanip>
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 
 HbAnalysis::HbAnalysis(const Circuit&          ckt_,
                        const SimulationConfig& sim_,
@@ -85,33 +86,36 @@ void HbAnalysis::harmonicsToTimeDomain(
 ) const {
     int H = K + 1;
 
-    for (int n = 0; n < nTimeSamples; ++n) {
-        double t = (static_cast<double>(n) / nTimeSamples) * T;
+    v_t.assign(nTimeSamples, Eigen::VectorXd::Zero(N));
 
-        for (int i = 0; i < N; ++i) {
-            double v = 0.0;
+    Eigen::FFT<double> fft;
+    std::vector<std::complex<double>> freq(nTimeSamples);
+    std::vector<std::complex<double>> time;
 
-            // DC 分量
-            if (i < Vk[0].size()) {
-                v = Vk[0](i).real();
+    for (int i = 0; i < nTimeSamples; ++i) {
+        // 构造「双边谱」：0, 1..K, 其余为 0，负频率用共轭补齐
+        std::fill(freq.begin(), freq.end(), std::complex<double>(0.0, 0.0));
+        freq[0] = Vk[0](i); // DC
+        for (int h = 1; h < H && h < nTimeSamples; ++h) {
+            freq[h] = Vk[h](i);
+            // 负频率位置 N - h，用共轭
+            int negIdx = nTimeSamples - h;
+            if (negIdx >= 0 && negIdx < nTimeSamples) {
+                freq[negIdx] = std::conj(Vk[h](i));
             }
+        }
+        fft.inv(time, freq);
+        const double scale = 1.0 / static_cast<double>(nTimeSamples);
 
-            // 高次谐波
-            for (int h = 1; h < H; ++h) {
-                double ang = h * omega0 * t;
-                double c = std::cos(ang);
-                double s = std::sin(ang);
-                const std::complex<double>& Vh = Vk[h](i);
-                v += 2.0 * ( Vh.real() * c - Vh.imag() * s );
-            }
-
-            v_t[n](i) = v;
+        for (int n = 0; n < nTimeSamples; ++n) {
+            double vt = time[n].real() * scale;  // 真正的 v(t_n)
+            v_t[n](i) = vt;
         }
     }
 }
 
-//时域非线性电流->FFT频谱域
-void HbAnalysis::timeDomainCurrentsToHarmonics(
+//时域非线性电流or电荷->FFT频谱域
+void HbAnalysis::timeDomainToHarmonics(
     const std::vector<Eigen::VectorXd>& Inl_t, 
     std::vector<CVector>& Inl_k
 ) const {
@@ -134,6 +138,48 @@ void HbAnalysis::timeDomainCurrentsToHarmonics(
             // 统一用 1/N 缩放，使逆/正变换一致
             Inl_k[h](i) = out[h] / static_cast<double>(nTimeSamples);
         }
+    }
+}
+
+void HbAnalysis::evalMosCapChargeAtTime(
+    const Eigen::VectorXd& v_t,
+    Eigen::VectorXd& Qcap_t
+) const {
+    Qcap_t.setZero(N);
+
+    auto addCapCharge = [&](int eq1, int eq2, double C) {
+        if(C <= 0.0) return;
+        double v1 = (eq1 >= 0 && eq1 < N) ? v_t(eq1) : 0.0;
+        double v2 = (eq2 >= 0 && eq2 < N) ? v_t(eq2) : 0.0;
+        double dv = v1 - v2;
+        if (eq1 >= 0 && eq1 < N) Qcap_t(eq1) += C * dv;
+        if (eq2 >= 0 && eq2 < N) Qcap_t(eq2) -= C * dv; 
+    };
+
+    for(const auto e : ckt.elements) {
+        auto m = std::dynamic_pointer_cast<MosfetBase>(e);
+        if(!m) continue;
+
+        const auto& nodes = m->getNodeIds();
+        int nD = nodes[0];
+        int nG = nodes[1];
+        int nS = nodes[2];
+        int nB = (nodes.size() > 3) ? nodes[3] : nodes[2];
+
+        int eqD = ckt.nodes[nD].eqIndex;
+        int eqG = ckt.nodes[nG].eqIndex;
+        int eqS = ckt.nodes[nS].eqIndex;
+        int eqB = ckt.nodes[nB].eqIndex;
+        //MOS的寄生电容模型
+        double Cj0 = m->getCj0();
+        double Cgs = 0.5 * Cj0, Cgd = 0.5 * Cj0,
+               CsJ = Cj0, CdJ = Cj0;
+
+        addCapCharge(eqG, eqS, Cgs);//Gate-source
+        addCapCharge(eqG, eqD, Cgd);//gate-drain
+        addCapCharge(eqS, eqB, CsJ);//source-bulk
+        addCapCharge(eqD, eqB, CdJ);//drain-bulk
+
     }
 }
 
@@ -214,18 +260,38 @@ void HbAnalysis::computeResidualAndTimeDomainJacobian(
     std::vector<Eigen::VectorXd> v_t;
     harmonicsToTimeDomain(Vk, v_t);
 
-    //4.nonlinear cuurent Inl(t_n)
+    //4.时域：非线性电流 i_nl(t)，以及 d i / d v;MOS电容电荷Qcap(t_n)
+    Gnl_t_vec.clear();
+    Gnl_t_vec.reserve(nTimeSamples);
+
     std::vector<Eigen::VectorXd> Inl_t(nTimeSamples, Eigen::VectorXd::Zero(N));
-    Gnl_t_vec.assign(nTimeSamples, Eigen::VectorXd::Zero(N, N));
-    for(int n = 0; n < nTimeSamples; ++n) {
-        evalNonlinearCurrentsAtTime(v_t[n], Inl_t[n], Gnl_t_vec[n]);
+    for (int n = 0; n < nTimeSamples; ++n) {
+        Eigen::MatrixXd Gnl_t(N, N);
+        evalNonlinearCurrentsAtTime(v_t[n], Inl_t[n], Gnl_t);
+        Gnl_t_vec.push_back(Gnl_t);
     }
 
-    // 5.Inl(t_n) -> Inl_k via FFT
-    std::vector<CVector> Inl_k;
-    timeDomainCurrentsToHarmonics(Inl_t, Inl_k);
+    std::vector<Eigen::VectorXd> Qcap_t(nTimeSamples, Eigen::VectorXd::Zero(N));
+    for(int n = 0; n < nTimeSamples; ++n) {
+        evalMosCapChargeAtTime(v_t[n], Qcap_t[n]);
+    }
 
-    //6.频域KCL
+    //5.时域 -> 频域：非线性电流 I_nl(V); Qcap(t_n) -> Qk -> IQ_k
+    std::vector<CVector> Inl_k, Qk;
+    timeDomainToHarmonics(Inl_t, Inl_k);
+    timeDomainToHarmonics(Qcap_t, Qk);
+
+
+    //6.非线性电荷 Q(V) 与 ΩQ(V)
+    std::vector<CVector> Iq_k(H, CVector::Zero(N));
+    for(int h = 0; h < H; ++h) {
+        double omega_k = h * omega0;
+        std::complex<double> jw(0.0, omega_k);
+        Iq_k[h] = jw * Qk[h];
+    }
+
+    
+    //7.频域KCL
     F.resize(numRealVars());
     F.setZero();
 
@@ -424,6 +490,53 @@ bool HbAnalysis::newtonSolve(Eigen::VectorXd& x) const {
     return false;    
 }
 
+void HbAnalysis::writeHbTimeCsv(
+    const Eigen::VectorXd& x, 
+    const std::string& outFile
+) const {
+    std::vector<CVector> Vk;
+    std::vector<Eigen::VectorXd> v_t;
+    unpackRealToHarmonics(x, Vk);
+    harmonicsToTimeDomain(Vk, v_t);
+    
+    std::ofstream ofs(outFile);
+    if (!ofs) {
+        std::cerr << "[HB] Cannot open '" << outFile << "' for write.\n";
+        return;
+    }
+
+    ofs << std::scientific << std::setprecision(9);
+
+    // eqIndex -> node 名字的映射
+    std::vector<int> eq2node(N, -1);
+    for (int nid = 0; nid < (int)ckt.nodes.size(); ++nid) {
+        int eq = ckt.nodes[nid].eqIndex;
+        if (eq >= 0 && eq < N) eq2node[eq] = nid;
+    }
+    // 表头
+    ofs << "time";
+    for (int eq = 0; eq < N; ++eq) {
+        int nid = eq2node[eq];
+        if (nid < 0) continue;
+        ofs << ",V(" << ckt.nodes[nid].name << ")";
+    }
+    ofs << "\n";
+    // 每个时间采样点一行
+    for (int n = 0; n < nTimeSamples; ++n) {
+        double t = (static_cast<double>(n) / nTimeSamples) * T;
+        ofs << t;
+        const auto& vt = v_t[n];
+        for (int eq = 0; eq < N; ++eq) {
+            int nid = eq2node[eq];
+            if (nid < 0) continue;
+            double v = (eq >= 0 && eq < vt.size()) ? vt(eq) : 0.0;
+            ofs << "," << v;
+        }
+        ofs << "\n";
+    }
+    std::cout << "[HB] Time-domain waveform written to '" << outFile << "'.\n";
+}
+
 bool HbAnalysis::run(Eigen::VectorXd& xOut) const {
     if (N <= 0 || K < 0 || nTimeSamples <= 0 || f0 <= 0.0) {
         std::cerr << "[HB] Invalid configuration.\n";
@@ -445,3 +558,10 @@ bool HbAnalysis::run(Eigen::VectorXd& xOut) const {
     xOut = x;
     return ok;
 } 
+
+bool HbAnalysis::run(Eigen::VectorXd& xOut, const std::string& outFile) const {
+    bool ok = run(xOut);
+    if(!ok) return false;
+    writeHbTimeCsv(xOut, outFile);
+    return true;
+}

@@ -43,7 +43,8 @@ public:
     // 给定 ramp 进度，计算当前步的基础 gmin
     double baseGmin(double rampScale) const {
         rampScale = std::clamp(rampScale, 0.0, 1.0);
-        return (gminHighBase - gminLowBase) * (1.0 - rampScale) + gminLowBase * rampScale;
+        return gminHighBase * (1.0 - rampScale) + gminLowBase * rampScale;
+;
     }
 
     // LU 版的初始 alpha
@@ -159,14 +160,14 @@ private:
     };
 
     HbVarIndex decodeVarIndex(int p) const;
-    // --- 实数 <-> 谐波系数 ---
+    // --- 实数 -> 谐波系数 ---
     void unpackRealToHarmonics(const Eigen::VectorXd& x,
                                std::vector<CVector>& Vk) const;
     // ---- 时域采样 / 频域变换 ----
     void harmonicsToTimeDomain(const std::vector<CVector>& Vk,
                                std::vector<Eigen::VectorXd>& x_t) const;
     // --- 时域非线性电流 -> 谐波电流谱（DFT）---
-    void timeDomainCurrentsToHarmonics(
+    void timeDomainToHarmonics(
         const std::vector<Eigen::VectorXd>& Inl_t,
         std::vector<CVector>& Inl_k) const;
 
@@ -174,6 +175,11 @@ private:
     void evalNonlinearCurrentsAtTime(const Eigen::VectorXd& v_t,
         Eigen::VectorXd& Inl_t,
         Eigen::MatrixXd& Gnl_t) const;
+
+    void evalMosCapChargeAtTime(
+        const Eigen::VectorXd& v_t,
+        Eigen::VectorXd& Qcap_t
+    ) const;
 
       // --- 线性部分：频域 Y_k / J_k ---
     void buildLinearYJ(double omega_k, double gmin,
@@ -196,10 +202,11 @@ private:
     // Newton 求解 F(x)=0，使用 ConvController 做阻尼 + gmin stepping
     bool newtonSolve(Eigen::VectorXd& x) const;
 
-public:
+    void writeHbTimeCsv(const Eigen::VectorXd& x, const std::string& outFile) const;
     HbAnalysis(const Circuit& ckt,
                const SimulationConfig& sim,
                const Eigen::VectorXd& dcOp);
+    bool run(Eigen::VectorXd& xOut, const std::string& outFile) const;
     bool run(Eigen::VectorXd& xOut) const;
 };
 
