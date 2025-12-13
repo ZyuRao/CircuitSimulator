@@ -320,110 +320,84 @@ void HbAnalysis::buildJacobianAnalytic(
     const int H = K + 1;
     J.setZero(n, n);
 
-    //线性部分
+    // ==== 1) 线性部分：逐谐波块填充，避免 O(n^2) 遍历 ====
     std::vector<CMatrix> Yk(H);
     std::vector<CVector> Jk(H);
-
     for (int h = 0; h < H; ++h) {
         double omega_k = h * omega0;
-        Yk[h] = CMatrix::Zero(N, N);
-        Jk[h] = CVector::Zero(N);
-
         buildLinearYJ(h, omega_k, gmin, sourceScale, Yk[h], Jk[h]);
-    }
 
-    for (int p = 0; p < n; ++p) {
-        HbVarIndex vp = decodeVarIndex(p);
-        int hp = vp.h;
-        int ip = vp.node;
-        bool isReP = vp.isReal;
+        int rowBase = h * 2 * N;
+        for (int ip = 0; ip < N; ++ip) {
+            for (int iq = 0; iq < N; ++iq) {
+                std::complex<double> Y = Yk[h](ip, iq);
+                double yr = Y.real();
+                double yi = Y.imag();
 
-        if (hp >= H || ip >= N) continue;
+                int colRe = rowBase + iq;
+                int colIm = rowBase + N + iq;
 
-        for (int q = 0; q < n; ++q) {
-            HbVarIndex vq = decodeVarIndex(q);
-            int hq    = vq.h;
-            int iq    = vq.node;
-            bool isReQ = vq.isReal;
-
-            if (hq != hp || iq >= N) continue;
-
-            std::complex<double> Y = Yk[hp](ip, iq);
-
-            double dRe_dRe =  Y.real();
-            double dRe_dIm = -Y.imag();
-            double dIm_dRe =  Y.imag();
-            double dIm_dIm =  Y.real();
-
-            double contrib = 0.0;
-            if (isReP && isReQ) contrib = dRe_dRe;
-            else if (isReP && !isReQ) contrib = dRe_dIm;
-            else if (!isReP && isReQ) contrib = dIm_dRe;
-            else                      contrib = dIm_dIm;
-
-            J(p, q) += contrib;
+                J(rowBase + ip,     colRe) += yr;
+                J(rowBase + ip,     colIm) += -yi;
+                J(rowBase + N + ip, colRe) += yi;
+                J(rowBase + N + ip, colIm) += yr;
+            }
         }
     }
 
-    //非线性
-    std::vector<std::vector<double>> cosTable(H, std::vector<double>(nTimeSamples));
-    std::vector<std::vector<double>> sinTable(H, std::vector<double>(nTimeSamples));
-
+    // ==== 2) 非线性部分：用 FFT 同时累积所有 hp，复杂度 O(H*N^2*Nfft log Nfft) ====
+    std::vector<std::vector<double>> dvReal(H, std::vector<double>(nTimeSamples));
+    std::vector<std::vector<double>> dvImag(H, std::vector<double>(nTimeSamples));
     for (int h = 0; h < H; ++h) {
         for (int n_t = 0; n_t < nTimeSamples; ++n_t) {
-            double t = (static_cast<double>(n_t) / nTimeSamples) * T;
+            double t   = (static_cast<double>(n_t) / nTimeSamples) * T;
             double ang = h * omega0 * t;
-            cosTable[h][n_t] = std::cos(ang);
-            sinTable[h][n_t] = std::sin(ang);
+            if (h == 0) {
+                dvReal[h][n_t] = 1.0;
+                dvImag[h][n_t] = 0.0; // h=0 的虚部不影响时域电压
+            } else {
+                dvReal[h][n_t] = 2.0 * std::cos(ang);
+                dvImag[h][n_t] = -2.0 * std::sin(ang);
+            }
         }
     }
-    double fftScale = 1.0 /static_cast<double>(nTimeSamples);
-    for (int p = 0; p < n; ++p) {
-        HbVarIndex vp = decodeVarIndex(p);
-        int hp    = vp.h;
-        int ip    = vp.node;
-        bool isReP = vp.isReal;
 
-        if (hp >= H || ip >= N) continue;
+    Eigen::FFT<double> fft;
+    std::vector<std::complex<double>> wTime(nTimeSamples);
+    std::vector<std::complex<double>> wSpec;
+    const double fftScale = 1.0 / static_cast<double>(nTimeSamples);
 
-        for (int q = 0; q < n; ++q) {
-            HbVarIndex vq = decodeVarIndex(q);
-            int hq    = vq.h;
-            int iq    = vq.node;
-            bool isReQ = vq.isReal;
+    for (int q = 0; q < n; ++q) {
+        HbVarIndex vq   = decodeVarIndex(q);
+        int hq          = vq.h;
+        int iq          = vq.node;
+        bool isReQ      = vq.isReal;
+        if (iq >= N || hq >= H) continue;
 
-            if (iq >= N) continue;
+        // h=0 的虚部列对时域电压无影响，直接跳过
+        if (hq == 0 && !isReQ) continue;
 
-            double sum = 0.0;
+        const auto& dv_dx = isReQ ? dvReal[hq] : dvImag[hq];
 
+        for (int ip = 0; ip < N; ++ip) {
+            // wTime = Gnl(ip,iq,t) * dv_dx(t)
             for (int n_t = 0; n_t < nTimeSamples; ++n_t) {
-                const Eigen::MatrixXd& Gnl_n = Gnl_t_vec[n_t];
-
-                double dInl_dv = Gnl_n(ip, iq); // ∂I_nl(ip,t_n)/∂v(iq,t_n)
-
-                double dv_dx = 0.0;
-                if (hq == 0) {
-                    // DC 分量：只依赖 Re(V0)
-                    dv_dx = isReQ ? 1.0 : 0.0;
-                } else {
-                    double c = cosTable[hq][n_t];
-                    double s = sinTable[hq][n_t];
-                    if (isReQ) dv_dx = 2.0 * c;
-                    else       dv_dx = -2.0 * s;
-                }
-
-                double c_hp = cosTable[hp][n_t];
-                double s_hp = sinTable[hp][n_t];
-
-                double dRe_dInl = fftScale * c_hp;
-                double dIm_dInl = -fftScale * s_hp;
-
-                double dF_dInl = isReP ? dRe_dInl : dIm_dInl;
-
-                sum += dF_dInl * dInl_dv * dv_dx;
+                double g = Gnl_t_vec[n_t](ip, iq);
+                wTime[n_t] = std::complex<double>(g * dv_dx[n_t], 0.0);
             }
 
-            J(p, q) += sum;
+            fft.fwd(wSpec, wTime);
+
+            for (int hp = 0; hp < H && hp < static_cast<int>(wSpec.size()); ++hp) {
+                std::complex<double> dInl = wSpec[hp] * fftScale;
+
+                int rowBase = hp * 2 * N;
+                int rowRe   = rowBase + ip;
+                int rowIm   = rowBase + N + ip;
+
+                J(rowRe, q) += dInl.real();
+                J(rowIm, q) += dInl.imag();
+            }
         }
     }
 }
@@ -440,6 +414,8 @@ bool HbAnalysis::newtonSolve(Eigen::VectorXd& x, double rampScale) const {
     double prevStep= std::numeric_limits<double>::infinity();
 
     Eigen::VectorXd F(n), Ftry(n);
+    Eigen::VectorXd bestX = x;
+    double bestNorm = std::numeric_limits<double>::infinity();
 
     for (int it = 0; it < maxIters; ++it) {
         // ===== 1) 残差 F(x) + 时域 Gnl(t) =====
@@ -447,6 +423,10 @@ bool HbAnalysis::newtonSolve(Eigen::VectorXd& x, double rampScale) const {
         computeResidualAndTimeDomainJacobian(x, gmin, rampScale, F, Gnl_t_vec);
 
         const double normF = F.norm();
+        if (normF < bestNorm) {
+            bestNorm = normF;
+            bestX    = x;
+        }
 
         // residualTol 的 rhsScale：用 ||x||∞ 做一个稳定的尺度（比用 ||F|| 自己更靠谱）
         const double rhsScale = std::max(1.0, x.lpNorm<Eigen::Infinity>());
@@ -493,6 +473,10 @@ bool HbAnalysis::newtonSolve(Eigen::VectorXd& x, double rampScale) const {
             // 只要 residual 下降就接受（HB 这里比 Armijo 更实用、更稳）
             if (normFtry < normF) {
                 accepted = true;
+                if (normFtry < bestNorm) {
+                    bestNorm = normFtry;
+                    bestX    = xNext;
+                }
                 break;
             }
 
@@ -526,8 +510,18 @@ bool HbAnalysis::newtonSolve(Eigen::VectorXd& x, double rampScale) const {
                       << "||F||=" << normF
                       << ", step=" << prevStep
                       << ", alpha=" << alpha
-                      << ", gmin="  << gmin << "\n";
+                      << ", gmin="  << gmin
+                      << ", scale=" << rampScale << "\n";
         }
+    }
+
+    // 兜底：如果严格收敛失败，但残差已经足够小，则放宽接受，避免“无输出”
+    double looseTol = 1e-3 * std::max(1.0, bestX.lpNorm<Eigen::Infinity>());
+    if (std::isfinite(bestNorm) && bestNorm < looseTol) {
+        x = bestX;
+        std::cerr << "[HB] Newton fell back to relaxed acceptance: ||F||="
+                  << bestNorm << " < looseTol=" << looseTol << "\n";
+        return true;
     }
 
     return false;
@@ -597,10 +591,82 @@ bool HbAnalysis::run(Eigen::VectorXd& xOut) const {
     } else {
         std::cerr << "[HB] Warning: DC operating point size mismatch.\n";
     }
-    std::vector<double> ramps = {0.05, 0.1, 0.2, 0.4, 0.7, 1.0};
-    for (double s : ramps) {
-        bool ok = newtonSolve(x, s);
-        if (!ok) return false;
+
+    // 用一个周期的瞬态积分构造初始波形，再做 FFT 得到谐波初值
+    Eigen::VectorXd xInitFull;
+    bool haveInit = false;
+    try {
+        const double dt = T / static_cast<double>(nTimeSamples);
+        std::vector<Eigen::VectorXd> samples;
+        samples.reserve(nTimeSamples);
+
+        TransientAnalysis tran(ckt, sim, "hb_init_dummy.csv");
+        auto dump = [&](double /*t*/, const Eigen::VectorXd& xt) {
+            if (static_cast<int>(samples.size()) < nTimeSamples) {
+                samples.push_back(xt);
+            }
+        };
+        tran.integrateOnePeriodBE(xdc, 0.0, dt, T, dump);
+
+        if (static_cast<int>(samples.size()) >= nTimeSamples) {
+            samples.resize(nTimeSamples);
+            std::vector<CVector> VkGuess;
+            timeDomainToHarmonics(samples, VkGuess);
+
+            xInitFull.resize(numRealVars());
+            for (int h = 0; h < H; ++h) {
+                int base = h * 2 * N;
+                for (int i = 0; i < N; ++i) {
+                    std::complex<double> v = VkGuess[h](i);
+                    xInitFull(base + i)      = v.real();
+                    xInitFull(base + N + i)  = v.imag();
+                }
+            }
+            haveInit = true;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "[HB] Transient init failed: " << e.what() << "\n";
+    }
+
+    // 如果拿到了瞬态初值，按最小 ramp 比例缩放作为第一步的起点
+    std::vector<double> rampTargets = {0.05, 0.1, 0.2, 0.4, 0.7, 1.0};
+    if (haveInit) {
+        x = xInitFull * rampTargets.front();
+    }
+
+    // 连续延拓：如果直接跳到目标 scale 失败，就把步长减半继续逼近
+    double prevScale = 0.0;
+    for (double target : rampTargets) {
+        double current = prevScale;
+        double step    = target - current;
+        int    guard   = 0;
+
+        while (current < target - 1e-6) {
+            double next = std::min(target, current + step);
+            Eigen::VectorXd xTry = x;
+            if (prevScale > 0.0) {
+                double factor = next / prevScale;
+                xTry *= factor;
+            }
+
+            bool ok = newtonSolve(xTry, next);
+            if (ok) {
+                x        = std::move(xTry);
+                current   = next;
+                prevScale = current;
+                // 成功后适当放大步长，加速逼近目标
+                step = std::min(step * 1.5, target - current);
+                guard = 0;
+            } else {
+                step *= 0.5;
+                guard++;
+                if (step < 1e-4 || guard > 12) {
+                    std::cerr << "[HB] Continuation failed at scale="
+                              << next << " (target=" << target << ")\n";
+                    return false;
+                }
+            }
+        }
     }
     xOut = x;
     return true;

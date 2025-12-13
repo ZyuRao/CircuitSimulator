@@ -427,8 +427,9 @@ ConvController ConvController::forHb() {
 
     p.stepTolStart = 1e-6;
     p.stepTolFinal = 1e-9;
-    p.fAbsTol      = 1e-12;
-    p.fRelTol      = 1e-8;
+    // HB 收敛标准适当放宽，避免小信号被过严的阈值卡住
+    p.fAbsTol      = 1e-10;
+    p.fRelTol      = 1e-6;
 
     return ConvController(NonlinearSolveRole::HB_Newton_LU, p);
 }
