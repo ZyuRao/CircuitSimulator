@@ -30,12 +30,11 @@ public:
         const Eigen::VectorXd& x, const AnalysisContext& ctx
     ) const = 0;
 
-    virtual void stampAC(Eigen::MatrixXcd& /*Y*/, Eigen::VectorXcd& /*J*/,
-                         const Circuit& /*ckt*/,
-                         double /*omega*/) const
-    {
-        // 默认啥也不做，只有真正 AC 需要的元件去重载
+    virtual void stampAC(Eigen::MatrixXcd& Y, Eigen::VectorXcd& J,
+                     const Circuit& ckt, const AnalysisContext& ctx) const {
+        (void)Y; (void)J; (void)ckt; (void)ctx;
     }
+
 };
 
 class Resistor : public Element {
@@ -50,7 +49,7 @@ public:
                const Eigen::VectorXd& x,
                const AnalysisContext& ctx) const override;
     void stampAC(Eigen::MatrixXcd& Y, Eigen::VectorXcd& J,
-                const Circuit& ckt, double omega) const override;
+                const Circuit& ckt, const AnalysisContext& ctx) const override;
 };
 
 // 电流源 I（从 nodeIds[0] -> nodeIds[1]，值为 value）
@@ -67,7 +66,7 @@ public:
                const Eigen::VectorXd& x,
                const AnalysisContext& ctx) const override;
     void stampAC(Eigen::MatrixXcd& Y, Eigen::VectorXcd& J,
-                const Circuit& ckt, double omega) const override;
+                const Circuit& ckt, const AnalysisContext& ctx) const override;
 };
 
 class VoltageSource : public Element {
@@ -87,7 +86,7 @@ public:
                const AnalysisContext& ctx) const override;
 
     void stampAC(Eigen::MatrixXcd& Y, Eigen::VectorXcd& J,
-                const Circuit& ckt, double omega) const override;
+                const Circuit& ckt, const AnalysisContext& ctx) const override;
 };
 
 
@@ -110,7 +109,7 @@ public:
     }
 
     void stampAC(Eigen::MatrixXcd& Y, Eigen::VectorXcd& J,
-                 const Circuit& ckt, double omega) const override;
+                 const Circuit& ckt, const AnalysisContext& ctx) const override;
 };
 
 // 电感（DC 中视为 0V 电压源）
@@ -132,7 +131,7 @@ public:
                const Eigen::VectorXd& /*x*/,
                const AnalysisContext& ctx) const override;
     void stampAC(Eigen::MatrixXcd& Y, Eigen::VectorXcd& J,
-                const Circuit& ckt, double omega) const override;
+                const Circuit& ckt, const AnalysisContext& ctx) const override;
 };
 
 
@@ -160,6 +159,8 @@ public:
                const Circuit& ckt,
                const Eigen::VectorXd& x,
                const AnalysisContext& ctx) const override;
+    void stampAC(Eigen::MatrixXcd& Y, Eigen::VectorXcd& J,
+             const Circuit& ckt, const AnalysisContext& ctx) const override;
     void stampNonlinearConductance(Eigen::MatrixXd& Gnl,
                                    const Circuit& ckt,
                                    const Eigen::VectorXd& nodeVoltages) const;

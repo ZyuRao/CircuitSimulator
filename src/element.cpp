@@ -6,6 +6,48 @@
 
 // =============== 各元件 stamp 实现 ===============
 
+
+static std::complex<double> evalSourcePhasor(const SourceSpec& spec,
+                                             const AnalysisContext& ctx)
+{
+    using cd = std::complex<double>;
+    cd j(0.0, 1.0);
+
+    // AC 小信号：沿用你们原逻辑
+    if (ctx.type == AnalysisType::AC) {
+        double phaseRad = spec.acPhaseDeg * M_PI / 180.0;
+        return std::polar(spec.acMag, phaseRad);
+    }
+
+    // HB：把“单音 SIN”映射到对应谐波系数
+    if (ctx.type == AnalysisType::HB) {
+        // DC 分量（h=0）：dcValue + sine.v0，并乘 sourceScale
+        if (ctx.hbHarm == 0) {
+            return cd(spec.evalDC(ctx.sourceScale), 0.0);
+        }
+
+        // 只支持 SIN（PULSE/PWL 先不支持，HB 里返回 0）
+        if (spec.tran.type != WaveformType::SIN) return cd(0.0, 0.0);
+
+        const auto& s = spec.tran.sine;
+        if (s.freq <= 0.0 || ctx.hbF0 <= 0.0) return cd(0.0, 0.0);
+
+        // 单音 HB：只在 s.freq ≈ h*f0 时给该谐波注入
+        double target = ctx.hbHarm * ctx.hbF0;
+        double tol = 1e-6 * std::max(1.0, s.freq);
+        if (std::abs(s.freq - target) > tol) return cd(0.0, 0.0);
+
+        // v(t)=v0+va*sin(ω(t-td)+phi) => 正频率系数 Vk = (-j)*(va/2)*exp(j*(phi-ωtd))
+        double omega = 2.0 * M_PI * s.freq;
+        double phase = s.phi - omega * s.td;
+
+        return (-j) * (0.5 * s.va * ctx.sourceScale) * std::exp(j * phase);
+    }
+
+    return cd(0.0, 0.0);
+}
+
+
 void Resistor::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
                      const Circuit& ckt,
                      const Eigen::VectorXd& /*x*/,
@@ -65,20 +107,22 @@ void CurrentSource::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
     if (eqM >= 0) I(eqM) += Ival;  // 离开 m 的电流 -Ival => I += Ival
 }
 
-void CurrentSource::stampAC(Eigen::MatrixXcd& Y, Eigen::VectorXcd& J,
-                            const Circuit& ckt, double) const {
+void CurrentSource::stampAC(Eigen::MatrixXcd&, Eigen::VectorXcd& J,
+                            const Circuit& ckt,
+                            const AnalysisContext& ctx) const
+{
     using cd = std::complex<double>;
-    int np = nodeIds[0];
-    int nm = nodeIds[1];
+    int np  = nodeIds[0];
+    int nm  = nodeIds[1];
     int eqP = ckt.nodes[np].eqIndex;
     int eqM = ckt.nodes[nm].eqIndex;
 
-    double phaseRad = spec.acPhaseDeg * M_PI / 180.0;
-    cd Iac = std::polar(spec.acMag, phaseRad);
+    cd I = evalSourcePhasor(spec, ctx);
 
-    if(eqP >= 0) J(eqP) -= Iac;
-    if(eqM >= 0) J(eqM) += Iac;
+    if (eqP >= 0) J(eqP) -= I;
+    if (eqM >= 0) J(eqM) += I;
 }
+
 
 void VoltageSource::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
                           const Circuit& ckt,
@@ -122,13 +166,13 @@ void VoltageSource::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
     I(k) += Vval;
 }
 
-void VoltageSource::stampAC(
-    Eigen::MatrixXcd& Y, Eigen::VectorXcd& J, 
-    const Circuit& ckt, double 
-) const {
+void VoltageSource::stampAC(Eigen::MatrixXcd& Y, Eigen::VectorXcd& J,
+                            const Circuit& ckt,
+                            const AnalysisContext& ctx) const
+{
     using cd = std::complex<double>;
-    int np = nodeIds[0];
-    int nm = nodeIds[1];
+    int np  = nodeIds[0];
+    int nm  = nodeIds[1];
     int eqP = ckt.nodes[np].eqIndex;
     int eqM = ckt.nodes[nm].eqIndex;
     int k   = branchEqIndex;
@@ -138,17 +182,16 @@ void VoltageSource::stampAC(
         return;
     }
 
-    double phaseRad = spec.acPhaseDeg * M_PI / 180.0;
-    cd Vac = std::polar(spec.acMag, phaseRad);
-
+    // MNA stamping（和 AC/HB 都一样）
     if (eqP >= 0) Y(eqP, k) += cd(1.0, 0.0);
     if (eqM >= 0) Y(eqM, k) -= cd(1.0, 0.0);
-
     if (eqP >= 0) Y(k, eqP) += cd(1.0, 0.0);
     if (eqM >= 0) Y(k, eqM) -= cd(1.0, 0.0);
 
-    J(k) += Vac;
+    cd V = evalSourcePhasor(spec, ctx);
+    J(k) += V;
 }
+
 
 
 
@@ -307,7 +350,7 @@ void MosfetBase::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
 }
 
 void Resistor::stampAC(Eigen::MatrixXcd& Y, Eigen::VectorXcd& J,
-                       const Circuit& ckt, double /*omega*/) const {
+                       const Circuit& ckt, const AnalysisContext& ctx) const {
     (void)J;
     int n1 = nodeIds[0];
     int n2 = nodeIds[1];
@@ -329,23 +372,17 @@ void Resistor::stampAC(Eigen::MatrixXcd& Y, Eigen::VectorXcd& J,
 } 
 
 void CapacitorElement::stampAC(Eigen::MatrixXcd& Y, Eigen::VectorXcd& J,
-                               const Circuit& ckt, double omega) const 
+                               const Circuit& ckt,
+                               const AnalysisContext& ctx) const
 {
-    (void) J;
-    int n1 = nodeIds[0];
-    int n2 = nodeIds[1];
-    int eq1 = ckt.nodes[n1].eqIndex;
-    int eq2 = ckt.nodes[n2].eqIndex;
+    (void)J;
+    int eq1 = ckt.nodes[nodeIds[0]].eqIndex;
+    int eq2 = ckt.nodes[nodeIds[1]].eqIndex;
 
-    if (C <= 0.0) {
-        return; // 0 电容，忽略
-    }
-    // DC (omega=0) 时，电容在 AC 中也视为开路
-    if (omega == 0.0) {
-        return;
-    }
+    if (C <= 0.0) return;
+    if (ctx.omega == 0.0) return;
 
-    std::complex<double> y(0.0, omega * C);
+    std::complex<double> y(0.0, ctx.omega * C); // jωC
     if (eq1 >= 0) Y(eq1, eq1) += y;
     if (eq2 >= 0) Y(eq2, eq2) += y;
     if (eq1 >= 0 && eq2 >= 0) {
@@ -354,33 +391,70 @@ void CapacitorElement::stampAC(Eigen::MatrixXcd& Y, Eigen::VectorXcd& J,
     }
 }
 
+
 void Inductor::stampAC(Eigen::MatrixXcd& Y, Eigen::VectorXcd& J,
-                       const Circuit& ckt, double omega) const
+                       const Circuit& ckt,
+                       const AnalysisContext& ctx) const
 {
-    (void) J;
-    int np = nodeIds[0];
-    int nm = nodeIds[1];
-    int eqP = ckt.nodes[np].eqIndex;
-    int eqM = ckt.nodes[nm].eqIndex;
+    (void)J;
+    int eqP = ckt.nodes[nodeIds[0]].eqIndex;
+    int eqM = ckt.nodes[nodeIds[1]].eqIndex;
     int k   = branchEqIndex;
 
     if (k < 0 || k >= Y.rows()) {
         std::cerr << "Internal error: invalid branchEqIndex for inductor "
-                    << name << " in AC.\n";
+                  << name << " in AC/HB.\n";
         return;
     }
 
-    std::complex<double> z(0.0, omega * L);
-
+    std::complex<double> z(0.0, ctx.omega * L); // jωL
 
     if (eqP >= 0) Y(eqP, k) += std::complex<double>(1.0, 0.0);
     if (eqM >= 0) Y(eqM, k) -= std::complex<double>(1.0, 0.0);
 
-    // 支路方程：V(p) - V(m) - jωL * I_L = 0
     if (eqP >= 0) Y(k, eqP) += std::complex<double>(1.0, 0.0);
     if (eqM >= 0) Y(k, eqM) -= std::complex<double>(1.0, 0.0);
 
+    // V(p)-V(m) - jωL*I = 0
     Y(k, k) += -z;
+}
+
+void MosfetBase::stampAC(Eigen::MatrixXcd& Y, Eigen::VectorXcd& J,
+                         const Circuit& ckt,
+                         const AnalysisContext& ctx) const
+{
+    (void)J;
+    if (ctx.omega == 0.0) return; // DC 下电容开路
+
+    using cd = std::complex<double>;
+
+    auto stampCap = [&](int eq1, int eq2, double C) {
+        if (C <= 0.0) return;
+        cd y(0.0, ctx.omega * C);
+        if (eq1 >= 0) Y(eq1, eq1) += y;
+        if (eq2 >= 0) Y(eq2, eq2) += y;
+        if (eq1 >= 0 && eq2 >= 0) {
+            Y(eq1, eq2) -= y;
+            Y(eq2, eq1) -= y;
+        }
+    };
+
+    int nD = nodeIds[0], nG = nodeIds[1], nS = nodeIds[2];
+    int nB = (nodeIds.size() > 3) ? nodeIds[3] : nodeIds[2];
+
+    int eqD = ckt.nodes[nD].eqIndex;
+    int eqG = ckt.nodes[nG].eqIndex;
+    int eqS = ckt.nodes[nS].eqIndex;
+    int eqB = ckt.nodes[nB].eqIndex;
+
+    // 你 HB 里现在用的模型：Cj0 常数拆分
+    double Cgs = 0.5 * Cj0, Cgd = 0.5 * Cj0;
+    double Csb = 1.0 * Cj0, Cdb = 1.0 * Cj0;
+
+    stampCap(eqG, eqS, Cgs);
+    stampCap(eqG, eqD, Cgd);
+    stampCap(eqS, eqB, Csb);
+    stampCap(eqD, eqB, Cdb);
 }
 
 void MosfetBase::evalIdsGmGds(

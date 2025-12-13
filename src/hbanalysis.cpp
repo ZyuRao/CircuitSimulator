@@ -92,24 +92,24 @@ void HbAnalysis::harmonicsToTimeDomain(
     std::vector<std::complex<double>> freq(nTimeSamples);
     std::vector<std::complex<double>> time;
 
-    for (int i = 0; i < nTimeSamples; ++i) {
+    const double Nfft = static_cast<double>(nTimeSamples);
+
+    for (int i = 0; i < N; ++i) {
         // 构造「双边谱」：0, 1..K, 其余为 0，负频率用共轭补齐
         std::fill(freq.begin(), freq.end(), std::complex<double>(0.0, 0.0));
-        freq[0] = Vk[0](i); // DC
+        freq[0] = Vk[0](i) * Nfft; // DC
         for (int h = 1; h < H && h < nTimeSamples; ++h) {
-            freq[h] = Vk[h](i);
+            freq[h] = Vk[h](i) * Nfft;
             // 负频率位置 N - h，用共轭
             int negIdx = nTimeSamples - h;
             if (negIdx >= 0 && negIdx < nTimeSamples) {
-                freq[negIdx] = std::conj(Vk[h](i));
+                freq[negIdx] = std::conj(Vk[h](i)) * Nfft;
             }
         }
         fft.inv(time, freq);
-        const double scale = 1.0 / static_cast<double>(nTimeSamples);
-
+        
         for (int n = 0; n < nTimeSamples; ++n) {
-            double vt = time[n].real() * scale;  // 真正的 v(t_n)
-            v_t[n](i) = vt;
+            v_t[n](i) = time[n].real();
         }
     }
 }
@@ -156,7 +156,7 @@ void HbAnalysis::evalMosCapChargeAtTime(
         if (eq2 >= 0 && eq2 < N) Qcap_t(eq2) -= C * dv; 
     };
 
-    for(const auto e : ckt.elements) {
+    for(const auto& e : ckt.elements) {
         auto m = std::dynamic_pointer_cast<MosfetBase>(e);
         if(!m) continue;
 
@@ -215,17 +215,22 @@ void HbAnalysis::evalNonlinearCurrentsAtTime(
 }
 
 void HbAnalysis::buildLinearYJ(
-    double omega_k, double gmin,
-    CMatrix& Yk,
-    CVector& Jk
+    int h, double omega_k, double gmin, double sourceScale,
+    CMatrix& Yk, CVector& Jk
 ) const {
     Yk = CMatrix::Zero(N, N);
     Jk = CVector::Zero(N);
+
+    AnalysisContext ctx;
+    ctx.type        = AnalysisType::HB;
+    ctx.omega       = omega_k;
+    ctx.sourceScale = sourceScale;
+    ctx.hbHarm      = h;
+    ctx.hbF0        = f0;
+
     for (const auto& e : ckt.elements) {
-        if (std::dynamic_pointer_cast<MosfetBase>(e)) {
-            continue;
-        }
-        e->stampAC(Yk, Jk, ckt, omega_k);
+        // 现在 MOS 也可以进来：它的 stampAC 只 stamp 寄生电容
+        e->stampAC(Yk, Jk, ckt, ctx);
     }
 
     stampGlobalGmin(ckt, Yk, gmin);
@@ -234,7 +239,7 @@ void HbAnalysis::buildLinearYJ(
 
 void HbAnalysis::computeResidualAndTimeDomainJacobian(
     const Eigen::VectorXd& x,
-    double gmin,
+    double gmin, double sourceScale,
     Eigen::VectorXd& F,
     std::vector<Eigen::MatrixXd>& Gnl_t_vec
 ) const {
@@ -252,7 +257,7 @@ void HbAnalysis::computeResidualAndTimeDomainJacobian(
     std::vector<CVector> Jk(H), Ilin_k(H);
     for(int h = 0; h < H; h++) {
         double omega_k = h * omega0;
-        buildLinearYJ(omega_k, gmin, Yk[h], Jk[h]);
+        buildLinearYJ(h, omega_k, gmin, sourceScale, Yk[h], Jk[h]);
         Ilin_k[h] = Yk[h] * Vk[h];
     }
 
@@ -271,24 +276,24 @@ void HbAnalysis::computeResidualAndTimeDomainJacobian(
         Gnl_t_vec.push_back(Gnl_t);
     }
 
-    std::vector<Eigen::VectorXd> Qcap_t(nTimeSamples, Eigen::VectorXd::Zero(N));
-    for(int n = 0; n < nTimeSamples; ++n) {
-        evalMosCapChargeAtTime(v_t[n], Qcap_t[n]);
-    }
+    // std::vector<Eigen::VectorXd> Qcap_t(nTimeSamples, Eigen::VectorXd::Zero(N));
+    // for(int n = 0; n < nTimeSamples; ++n) {
+    //     evalMosCapChargeAtTime(v_t[n], Qcap_t[n]);
+    // }
 
     //5.时域 -> 频域：非线性电流 I_nl(V); Qcap(t_n) -> Qk -> IQ_k
     std::vector<CVector> Inl_k, Qk;
     timeDomainToHarmonics(Inl_t, Inl_k);
-    timeDomainToHarmonics(Qcap_t, Qk);
+    // timeDomainToHarmonics(Qcap_t, Qk);
 
 
     //6.非线性电荷 Q(V) 与 ΩQ(V)
-    std::vector<CVector> Iq_k(H, CVector::Zero(N));
-    for(int h = 0; h < H; ++h) {
-        double omega_k = h * omega0;
-        std::complex<double> jw(0.0, omega_k);
-        Iq_k[h] = jw * Qk[h];
-    }
+    // std::vector<CVector> Iq_k(H, CVector::Zero(N));
+    // for(int h = 0; h < H; ++h) {
+    //     double omega_k = h * omega0;
+    //     std::complex<double> jw(0.0, omega_k);
+    //     Iq_k[h] = jw * Qk[h];
+    // }
 
     
     //7.频域KCL
@@ -307,7 +312,7 @@ void HbAnalysis::computeResidualAndTimeDomainJacobian(
 }
 
 void HbAnalysis::buildJacobianAnalytic(
-    const Eigen::VectorXd& x, double gmin,
+    const Eigen::VectorXd& x, double gmin, double sourceScale,
     const std::vector<Eigen::MatrixXd>& Gnl_t_vec,
     Eigen::MatrixXd& J
 ) const {
@@ -324,7 +329,7 @@ void HbAnalysis::buildJacobianAnalytic(
         Yk[h] = CMatrix::Zero(N, N);
         Jk[h] = CVector::Zero(N);
 
-        buildLinearYJ(omega_k, gmin, Yk[h], Jk[h]);
+        buildLinearYJ(h, omega_k, gmin, sourceScale, Yk[h], Jk[h]);
     }
 
     for (int p = 0; p < n; ++p) {
@@ -424,56 +429,94 @@ void HbAnalysis::buildJacobianAnalytic(
 }
 
 
-bool HbAnalysis::newtonSolve(Eigen::VectorXd& x) const {
-    const int n = numRealVars();
-    const int maxIters = 20;
-    const double tolF = 1e-6;
-    const double tolStep = 1e-6;
-    
-    Eigen::VectorXd F(n);
-    ConvController ctrl;
-    double alpha = ctrl.initialAlphaLU();
-    double gmin = ctrl.baseGmin(1.0);
-    double prevErr = std::numeric_limits<double>::infinity();
+bool HbAnalysis::newtonSolve(Eigen::VectorXd& x, double rampScale) const {
+    const int n        = numRealVars();
+    const int maxIters = 25;
 
-    for(int it = 0; it < maxIters; ++it) {
+    ConvController ctrl = ConvController::forHb();
+
+    double alpha   = ctrl.params().alphaInit;
+    double gmin    = ctrl.baseGmin(rampScale);
+    double prevStep= std::numeric_limits<double>::infinity();
+
+    Eigen::VectorXd F(n), Ftry(n);
+
+    for (int it = 0; it < maxIters; ++it) {
+        // ===== 1) 残差 F(x) + 时域 Gnl(t) =====
         std::vector<Eigen::MatrixXd> Gnl_t_vec;
-        //1.当前残差F(x)
-        computeResidualAndTimeDomainJacobian(x, gmin, F, Gnl_t_vec);
-        double normF = F.norm();
-        // std::cout << "[HB] Newton iter " << it
-        //           << ", ||F||=" << normF
-        //           << ", gmin="  << gmin
-        //           << ", alpha=" << alpha << "\n";
+        computeResidualAndTimeDomainJacobian(x, gmin, rampScale, F, Gnl_t_vec);
+
+        const double normF = F.norm();
+
+        // residualTol 的 rhsScale：用 ||x||∞ 做一个稳定的尺度（比用 ||F|| 自己更靠谱）
+        const double rhsScale = std::max(1.0, x.lpNorm<Eigen::Infinity>());
+        const double tolF     = ctrl.residualTol(rhsScale);
+        const double tolStep  = ctrl.stepTol(rampScale);
+
         if (normF < tolF) {
-            std::cout << "[HB] Converged by residual.\n";
+            // std::cout << "[HB] Converged by residual.\n";
             return true;
         }
 
-        //2.构造解析Jacobian
+        // ===== 2) 构造 Jacobian =====
         Eigen::MatrixXd J(n, n);
-        buildJacobianAnalytic(x, gmin, Gnl_t_vec, J);
+        buildJacobianAnalytic(x, gmin, rampScale, Gnl_t_vec, J);
 
-        //3.解J dx = -F
+        // ===== 3) 解线性方程 J dx = -F =====
         Eigen::VectorXd dx = Solver::solveLinearSystemLU(J, -F);
-        // if (!dx.allFinite()) {
-        //     std::cerr << "[HB] Newton: LU produced NaN/Inf.\n";
-        //     return false;
-        // }
-        auto st = ctrl.update(
-            x, x + dx, prevErr, it, alpha, gmin, 1.0, tolStep
-        );
+        if (!dx.allFinite()) {
+            // 线性解拒绝：提高 gmin，减小 alpha，重来
+            ctrl.onLinearReject(alpha, gmin);
+            continue;
+        }
 
-        x       = st.xNext;
-        alpha   = st.alphaNext;
-        gmin    = st.gminNext;
-        prevErr = st.error;
+        // ===== 4) controller 给一个“基于 step 的推荐 alpha/gmin” =====
+        Eigen::VectorXd xRaw = x + dx; // raw Newton step
+        ConvStatus st = ctrl.updateStep(x, xRaw, prevStep, it, alpha, gmin, rampScale);
 
-        if (st.converged) {
-            // 步长收敛后，再检查残差
-            computeResidualAndTimeDomainJacobian(x, gmin, F, Gnl_t_vec);
-            if (F.norm() < tolF) {
-                // std::cout << "[HB] Converged by step & residual.\n";
+        // 我们用 st 的 alpha/gmin 作为 first-try
+        double alphaTry = st.alphaNext;
+        double gminTry  = st.gminNext;
+
+        // ===== 5) 残差验收（轻量 backtracking，最多 3 次）=====
+        bool accepted = false;
+        Eigen::VectorXd xNext;
+
+        const int maxBT = 3; // 控制 FFT 代价，不要开到 12
+        for (int bt = 0; bt < maxBT; ++bt) {
+            xNext = x + alphaTry * dx;
+
+            std::vector<Eigen::MatrixXd> dummy;
+            computeResidualAndTimeDomainJacobian(xNext, gminTry, rampScale, Ftry, dummy);
+            const double normFtry = Ftry.norm();
+
+            // 只要 residual 下降就接受（HB 这里比 Armijo 更实用、更稳）
+            if (normFtry < normF) {
+                accepted = true;
+                break;
+            }
+
+            // 不下降就减小步长
+            alphaTry *= 0.5;
+            if (alphaTry < ctrl.params().lsAlphaMin) break;
+        }
+
+        if (!accepted) {
+            // residual 没变好：按统一策略惩罚 alpha/gmin，然后重来
+            ctrl.onLinearReject(alpha, gmin);
+            continue;
+        }
+
+        // ===== 6) 接受步长 =====
+        prevStep = (xNext - x).lpNorm<Eigen::Infinity>();
+        x = std::move(xNext);
+        alpha = std::clamp(alphaTry, ctrl.params().alphaMin, ctrl.params().alphaMax);
+        gmin  = gminTry;
+
+        // ===== 7) step + residual 双判据 =====
+        if (prevStep < tolStep) {
+            // Ftry 是接受点的残差（上一段已经算过）
+            if (Ftry.norm() < tolF) {
                 return true;
             }
         }
@@ -481,13 +524,13 @@ bool HbAnalysis::newtonSolve(Eigen::VectorXd& x) const {
         if (it == maxIters - 1) {
             std::cerr << "[HB] Newton did not converge: "
                       << "||F||=" << normF
-                      << ", stepErr=" << st.error
+                      << ", step=" << prevStep
                       << ", alpha=" << alpha
                       << ", gmin="  << gmin << "\n";
         }
     }
 
-    return false;    
+    return false;
 }
 
 void HbAnalysis::writeHbTimeCsv(
@@ -554,9 +597,13 @@ bool HbAnalysis::run(Eigen::VectorXd& xOut) const {
     } else {
         std::cerr << "[HB] Warning: DC operating point size mismatch.\n";
     }
-    bool ok = newtonSolve(x);
+    std::vector<double> ramps = {0.05, 0.1, 0.2, 0.4, 0.7, 1.0};
+    for (double s : ramps) {
+        bool ok = newtonSolve(x, s);
+        if (!ok) return false;
+    }
     xOut = x;
-    return ok;
+    return true;
 } 
 
 bool HbAnalysis::run(Eigen::VectorXd& xOut, const std::string& outFile) const {

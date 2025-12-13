@@ -41,6 +41,10 @@ struct AnalysisContext {
     double sourceScale = 1.0;
     double time = 0.0;
     double omega = 0.0;
+
+    //for hb
+    int hbHarm = 0;
+    double hbF0 = 0.0;
 };
 
 struct PulseSpec {

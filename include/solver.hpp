@@ -6,6 +6,7 @@
 #include <iostream>
 #include <complex>
 #include <random>
+#include <limits>
 
 // 专门放线性方程 G x = I 的求解算法
 // - 直接法：自写 LU 分解（部分主元）
@@ -193,6 +194,7 @@ namespace Solver {
 
         for (int it = 0; it < maxIters; ++it) {
             xOld = x;
+            int nanCount = 0;
 
             for (int i = 0; i < n; ++i) {
                 double diag = M(i, i);
@@ -207,12 +209,18 @@ namespace Solver {
                 double xi  = (1.0 - omega) * xOld(i) + omega * xGS;
 
                 if (!std::isfinite(xi)) {
-                    // 爆了：回退到 best，并收紧 omega
-                    x = bestX;
-                    omega = std::max(0.05, omega * 0.5);
-                    break;
+                    // 保持旧值，不更新此元素
+                    nanCount++;
+                    continue;
                 }
                 x(i) = xi;
+            }
+
+            // 如果NaN/Inf太多，回退并调整omega
+            if (nanCount > n / 4) {
+                x = bestX;
+                omega = std::max(0.05, omega * 0.5);
+                continue;
             }
 
             double rr = relResSPD(x);
@@ -238,6 +246,144 @@ namespace Solver {
         info.converged = false;
         info.relResidual = best;
         info.iters = maxIters;
+        return info;
+    }
+
+    // ===== Direct Gauss-Seidel on (scaled) Ax=b (no normal equations) =====
+    inline IterSolveInfo solveLinearSystemGaussSeidelInfo_Direct(
+        const MatrixXd& A,
+        const VectorXd& b,
+        const VectorXd& x0,
+        int maxIters = 8000,
+        double tol = 1e-10,
+        double omega = 1.0 // 1.0 = plain GS, (0,2) = SOR
+    ) {
+        IterSolveInfo info;
+        const int n = static_cast<int>(A.rows());
+        info.x = (x0.size() == n) ? x0 : VectorXd::Zero(n);
+        if (n == 0) { info.converged = true; info.relResidual = 0.0; return info; }
+        if (A.cols() != n || b.size() != n) {
+            std::cerr << "GS(D): dimension mismatch.\n";
+            info.x = VectorXd::Zero(std::max(n, 1));
+            return info;
+        }
+
+        // 1) Row scaling: Dr*A, Dr*b
+        VectorXd rS = VectorXd::Ones(n);
+        for (int i = 0; i < n; ++i) {
+            double mx = A.row(i).cwiseAbs().maxCoeff();
+            if (!std::isfinite(mx) || mx < 1e-18) mx = 1.0;
+            rS(i) = 1.0 / mx;
+        }
+
+        MatrixXd As = A;
+        VectorXd bs = b;
+        for (int i = 0; i < n; ++i) { As.row(i) *= rS(i); bs(i) *= rS(i); }
+
+        auto relResOriginal = [&](const VectorXd& xx) -> double {
+            VectorXd r = A * xx - b;
+            double rn = r.norm();
+            double bn = b.norm();
+            if (!std::isfinite(rn)) return std::numeric_limits<double>::infinity();
+            return (bn > 0.0) ? (rn / bn) : rn;
+        };
+
+        VectorXd x = info.x;
+        VectorXd bestX = x;
+        double best = relResOriginal(x);
+
+        const double diagFloor = 1e-12;
+        const int stallWindow = 80;
+        const double stallRatio = 0.999;
+        int stallCnt = 0;
+        double rrLast = best;
+
+        for (int it = 0; it < maxIters; ++it) {
+            VectorXd xOld = x;
+            int nanCount = 0;
+
+            for (int i = 0; i < n; ++i) {
+                double diag = As(i, i);
+                if (!std::isfinite(diag) || std::fabs(diag) < diagFloor) {
+                    nanCount++;
+                    continue;
+                }
+
+                double sum = bs(i);
+                // GS split: use newest for j<i, old for j>i
+                for (int j = 0; j < i; ++j)     sum -= As(i, j) * x(j);
+                for (int j = i + 1; j < n; ++j) sum -= As(i, j) * xOld(j);
+
+                double xGS = sum / diag;
+                double xi  = (1.0 - omega) * xOld(i) + omega * xGS;
+
+                if (!std::isfinite(xi)) {
+                    // 保持旧值，不更新此元素
+                    nanCount++;
+                    continue;
+                }
+                x(i) = xi;
+            }
+
+            // 如果NaN/Inf太多，回退并调整omega
+            if (nanCount > n / 4) {
+                x = bestX;
+                omega = std::max(0.05, omega * 0.5);
+                continue;
+            }
+
+            double rr = relResOriginal(x);
+            if (rr < best) { best = rr; bestX = x; }
+
+            if (rr <= tol) {
+                info.x = x;
+                info.converged = true;
+                info.relResidual = rr;
+                info.iters = it + 1;
+                return info;
+            }
+
+            // 残差明显变差：收紧 omega，避免发散
+            double rrOld = relResOriginal(xOld);
+            if (rr > rrOld * 1.5 && it > 3) {
+                omega = std::max(0.05, omega * 0.7);
+                x = bestX;
+            }
+
+            if (it > 5) {
+                if (rr >= rrLast * stallRatio) stallCnt++;
+                else stallCnt = 0;
+                rrLast = std::min(rrLast, rr);
+                if (stallCnt >= stallWindow) break;
+            }
+        }
+
+        // 正规方程兜底，处理约束行对角为 0、直接 GS 不易收敛的情况
+        MatrixXd AtA = A.transpose() * A;
+        VectorXd Atb = A.transpose() * b;
+        double diagMax = AtA.diagonal().cwiseAbs().maxCoeff();
+        if (!std::isfinite(diagMax) || diagMax < 1e-18) diagMax = 1.0;
+        AtA.diagonal().array() += 1e-14 * diagMax;
+
+        auto spd = gaussSeidelSPDInfo(AtA, Atb,
+                                      /*x0=*/bestX,
+                                      /*maxIters=*/3000,
+                                      /*tol=*/std::max(tol, 1e-10),
+                                      /*omega=*/1.0);
+
+        double rrFallback = relResOriginal(spd.x);
+        if (rrFallback < best) {
+            best = rrFallback;
+            bestX = spd.x;
+            info.converged = spd.converged || (best <= tol);
+            info.iters = spd.iters;
+        } else {
+            info.converged = false;
+            info.iters = maxIters;
+        }
+
+        info.x = bestX;
+        info.relResidual = best;
         return info;
     }
 
@@ -304,7 +450,7 @@ namespace Solver {
         VectorXd xBest = recoverX(y);
         double bestRR  = relResidualOriginal(xBest);
 
-        // 早停/判定“迭代没进展”的阈值
+        // 早停/判定"迭代没进展"的阈值
         const int   stallWindow = 50;
         const double stallRatio = 0.9995;   // 50 轮内残差下降不到 0.05% 就算停滞
 
@@ -313,6 +459,7 @@ namespace Solver {
 
         for (int it = 0; it < maxIters; ++it) {
             yOld = y;
+            int nanCount = 0;
 
             for (int i = 0; i < n; ++i) {
                 double diag = As(i, i);
@@ -328,11 +475,18 @@ namespace Solver {
                 double yi  = (1.0 - omega) * yOld(i) + omega * yGS;
 
                 if (!std::isfinite(yi)) {
-                    y = yOld;
-                    omega = std::max(0.05, omega * 0.5);
-                    break;
+                    // 保持旧值，不更新此元素
+                    nanCount++;
+                    continue;
                 }
                 y(i) = yi;
+            }
+
+            // 如果NaN/Inf太多，回退并调整omega
+            if (nanCount > n / 4) {
+                y = yOld;
+                omega = std::max(0.05, omega * 0.5);
+                continue;
             }
 
             VectorXd xCand = recoverX(y);

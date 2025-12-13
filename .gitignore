@@ -64,3 +64,7 @@ models/
 # === OS ===
 .DS_Store
 Thumbs.db
+
+# ===== Local configs / outputs that differ per developer =====
+*.json
+*.csv

@@ -115,17 +115,32 @@ VectorXd DcAnalysis::solveNewtonLU() const {
 
     const int    rampSteps      = 10;    // 电源从 0 ~ 1 分 10 步 ramp
     const int    maxNewtonIters = 50;    // 每个 ramp 步最长 Newton 迭代次数
-    const double tol            = 1e-9;  // Newton 收敛阈值（欧氏范数）
 
-    ConvController ctrl;
+    auto nonlinearResidual = [&](const VectorXd& xAt, double scale, double gmin) -> double {
+        MatrixXd G = MatrixXd::Zero(N, N);
+        VectorXd I = VectorXd::Zero(N);
+        AnalysisContext ctx = makeDcCtx(scale);
+
+        for (const auto& e : ckt.elements) e->stamp(G, I, ckt, xAt, ctx);
+        stampGlobalGmin(ckt, G, gmin);
+
+        VectorXd F = G * xAt - I;
+        double fn = F.norm();
+        return std::isfinite(fn) ? fn : std::numeric_limits<double>::infinity();
+    };
+
+    ConvController ctrl = ConvController::forDc(DcSolverKind::LU);
     x.setZero(N);
 
     for (int step = 1; step <= rampSteps; ++step) {
-        double scale   = static_cast<double>(step) / rampSteps;
-        double alpha   = ctrl.initialAlphaLU();
-        double gmin    = ctrl.baseGmin(scale);
-        double prevErr = std::numeric_limits<double>::infinity();
+        double scale = static_cast<double>(step) / rampSteps;
 
+        double alpha   = ctrl.params().alphaInit;
+        double gmin    = ctrl.baseGmin(scale);
+        double prevStep = std::numeric_limits<double>::infinity();
+
+        bool stepOK = false;
+        double lastRes = std::numeric_limits<double>::infinity();
         for (int iter = 0; iter < maxNewtonIters; ++iter) {
             MatrixXd G = MatrixXd::Zero(N, N);
             VectorXd I = VectorXd::Zero(N);
@@ -142,67 +157,51 @@ VectorXd DcAnalysis::solveNewtonLU() const {
             // 解 G x_new = I
             VectorXd xRaw = Solver::solveLinearSystemLU(G, I);
             if (!xRaw.allFinite()) {
-                gmin = std::min(gmin * 10.0, 1e-4);
+                gmin = std::min(gmin * 10.0, ctrl.params().gminAbsMax);
                 continue;
             }
 
-            auto st = ctrl.update(
-                x, xRaw, prevErr, iter,
-                alpha, gmin, scale, tol
-            );
+            auto st = ctrl.updateStep(x, xRaw, prevStep, iter, alpha, gmin, scale);
+            x        = st.xNext;
+            alpha    = st.alphaNext;
+            gmin     = st.gminNext;
+            prevStep = st.error;
 
-            x       = st.xNext;
-            alpha   = st.alphaNext;
-            gmin    = st.gminNext;
-            prevErr = st.error;
+            lastRes = nonlinearResidual(x, scale, gmin);
+            double tolF = ctrl.residualTol(/*rhsNorm=*/I.norm());
+            double tolStep = ctrl.stepTol(scale);
 
-            if (st.converged) {
+            if (lastRes <= tolF || prevStep <= tolStep) {
+                stepOK = true;
                 break;
             }
-            if (iter == maxNewtonIters - 1) {
-                std::cerr << "WARNING: Newton (LU) did not converge at ramp step "
-                          << step << " (err=" << st.error
-                          << ", alpha=" << alpha
-                          << ", gmin=" << gmin << ")\n";
-            }
+        }
+        if (!stepOK && step == rampSteps) {
+            std::cerr << "WARNING: Newton (LU) not fully converged at final scale=1"
+                      << " (res=" << lastRes
+                      << ", alpha=" << alpha
+                      << ", gmin=" << gmin << ")\n";
         }
     }
-
     return x;
 }
 
 
 VectorXd DcAnalysis::solveNewtonGS() const {
     int N = ckt.numUnknowns();
-    VectorXd x = VectorXd::Zero(std::max(N, 1));
-    if (N == 0) return x;
+    VectorXd x0 = VectorXd::Zero(std::max(N, 1));
+    if (N == 0) return x0;
 
-    // --- Newton/continuation 参数（迭代法比 LU 慢，尺度要更现实）---
-    const int    maxNewtonIters = 60;     // 每个 scale 的 Newton 迭代上限
-    const int    maxLineSearch  = 12;     // 线搜索回退次数
-    const double tolF_abs       = 1e-9;   // 残差绝对阈值
-    const double tolF_rel       = 1e-7;   // 残差相对阈值
-    const double tolX_rel       = 1e-6;   // 步长相对阈值（配合残差一起用）
-    const double alphaMin       = 0.02;   // 允许很小，但不是默认一直用它
-    const double alphaInit      = 1.0;    // 默认先尝试 full Newton
-    const double c1             = 1e-4;   // Armijo 常数
+    ConvController ctrl = ConvController::forDc(DcSolverKind::GaussSeidel);
+    const auto& p = ctrl.params();
 
-    ConvController ctrl;                 // 只用它的 baseGmin 思路
-    x.setZero(N);
-
-    // continuation：从 0 -> 1 的 scale，用自适应步长推进
+    VectorXd xGood = VectorXd::Zero(N);
     double goodScale = 0.0;
-    VectorXd xGood = x;
 
-    double dScale = 0.1;                 // 初始步长
-    const double minDScale = 1e-3;
+    double dScale = p.dScaleInit;
 
-    auto buildSystem = [&](const VectorXd& xAt,
-                           double scale,
-                           double gmin,
-                           MatrixXd& G,
-                           VectorXd& I)
-    {
+    auto buildSystem = [&](const VectorXd& xAt, double scale, double gmin,
+                           MatrixXd& G, VectorXd& I) {
         G.setZero(N, N);
         I.setZero(N);
         AnalysisContext ctx = makeDcCtx(scale);
@@ -210,10 +209,9 @@ VectorXd DcAnalysis::solveNewtonGS() const {
         stampGlobalGmin(ckt, G, gmin);
     };
 
-    auto residualNorm = [&](const MatrixXd& G,
-                            const VectorXd& I,
-                            const VectorXd& xAt) -> double
-    {
+    auto residualNorm = [&](const VectorXd& xAt, double scale, double gmin) -> double {
+        MatrixXd G(N, N); VectorXd I(N);
+        buildSystem(xAt, scale, gmin, G, I);
         VectorXd F = G * xAt - I;
         double fn = F.norm();
         return std::isfinite(fn) ? fn : std::numeric_limits<double>::infinity();
@@ -221,120 +219,126 @@ VectorXd DcAnalysis::solveNewtonGS() const {
 
     while (goodScale < 1.0 - 1e-15) {
         double targetScale = std::min(1.0, goodScale + dScale);
-
-        // 这一段是“尝试推进到 targetScale”
         VectorXd xTry = xGood;
+
+        // 每个 scale 开始时：gmin 从 base 起步
         double gmin = ctrl.baseGmin(targetScale);
 
         bool stepOK = false;
 
+        // 外层“Newton”迭代次数（你也可以把它放进 params）
+        const int maxNewtonIters = 60;
+
         for (int it = 0; it < maxNewtonIters; ++it) {
             MatrixXd G(N, N);
             VectorXd I(N);
-
             buildSystem(xTry, targetScale, gmin, G, I);
 
-            double Fnorm = residualNorm(G, I, xTry);
-            double Inorm = I.norm();
-            double tolF  = tolF_abs + tolF_rel * std::max(1.0, Inorm);
+            double Fnorm = (G * xTry - I).norm();
+            double tolF  = ctrl.residualTol(I.norm());
+            double tolStep = ctrl.stepTol(targetScale);
 
-            // 先用残差判断：已经够好就算这个 scale 收敛
-            if (Fnorm <= tolF) {
+            // 1) 残差已经够小：认为该 scale 收敛
+            if (std::isfinite(Fnorm) && Fnorm <= tolF) {
                 stepOK = true;
                 break;
             }
 
-            // 解线性化方程：G * xRaw = I
-            auto ls = Solver::solveLinearSystemGaussSeidelInfo(G, I, xTry,
-                                                   /*maxIters=*/8000,
-                                                   /*tol=*/1e-10);
-            VectorXd xRaw = ls.x;
-            if (!xRaw.allFinite()) {
-                gmin = std::min(gmin * 10.0, 1e-2);
-                continue;
-            }
+            // 2) 解线性化方程：G*xRaw = I （内层 GS）
+            //    这里用带缩放 + 正规方程兜底的版本，避免零对角的约束行把 GS 卡死
+            auto ls = Solver::solveLinearSystemGaussSeidelInfo(
+                G, I, xTry,
+                /*maxIters=*/8000,
+                /*tol=*/1e-10
+            );
 
-            // 线性残差验收（用原方程 Gx=I）
-            VectorXd rlin = G * xRaw - I;
+            VectorXd xRaw = ls.x;
             double linRel = ls.relResidual;
 
-            // 线性解太差才拒绝；阈值别太苛刻（让 line-search 发挥作用）
-            if (!std::isfinite(linRel) || linRel > 5e-3) {
-                gmin = std::min(gmin * 10.0, 1e-2);
+            // 线性内解太差：统一用 controller 的拒绝策略
+            if (!xRaw.allFinite() || !std::isfinite(linRel) || linRel > ctrl.linRelTol(targetScale)) {
+                double alphaDummy = p.alphaInit; // onLinearReject 需要一个 alpha 变量
+                ctrl.onLinearReject(alphaDummy, gmin);
                 continue;
             }
 
             VectorXd dx = xRaw - xTry;
-            double dxInf = dx.lpNorm<Eigen::Infinity>();
-            double xInf  = xTry.lpNorm<Eigen::Infinity>();
+            double stepInf = dx.lpNorm<Eigen::Infinity>();
+            double xInf = xTry.lpNorm<Eigen::Infinity>();
+            double linTol = ctrl.linRelTol(targetScale);
 
-            // 如果步长已经很小，也可以认为收敛（配合残差会更稳）
-            if (dxInf <= (1e-12 + tolX_rel * std::max(1.0, xInf)) && Fnorm <= 10 * tolF) {
-                stepOK = true;
-                break;
+            // 3) 如果步长已经非常小，也可认为收敛（配合残差的宽松倍数）
+            double tinyStep = 1e-12 + tolStep * std::max(1.0, xInf);
+            if (stepInf <= tinyStep) {
+                if (Fnorm <= 15.0 * tolF || linRel <= 5.0 * linTol) {
+                    stepOK = true;
+                    break;
+                }
             }
 
-            // Armijo 线搜索：优先 full step，失败就缩 alpha
-            double alpha = alphaInit;
-            VectorXd bestXls = xTry;
+            // 4) Armijo line-search（全部用 params）
+            double alpha = p.alphaInit;
+            VectorXd bestCand = xTry;
             double bestFn = Fnorm;
             bool accepted = false;
 
-            for (int lsit = 0; lsit < maxLineSearch; ++lsit) {
+            for (int lsit = 0; lsit < p.maxLineSearch; ++lsit) {
                 VectorXd cand = xTry + alpha * dx;
 
-                MatrixXd Gc(N, N);
-                VectorXd Ic(N);
-                buildSystem(cand, targetScale, gmin, Gc, Ic);
+                // 注意：这里用 cand 重新 stamp 后的 residual 做判据（非线性意义上）
+                double Fcand = residualNorm(cand, targetScale, gmin);
 
-                double Fcand = residualNorm(Gc, Ic, cand);
-
-                // Armijo: ||F(x+αdx)|| <= (1 - c1*α) ||F(x)||
-                if (std::isfinite(Fcand) && (Fcand <= (1.0 - c1 * alpha) * Fnorm)) {
+                if (std::isfinite(Fcand) && (Fcand <= (1.0 - p.armijoC1 * alpha) * Fnorm)) {
                     xTry = cand;
                     accepted = true;
                     break;
                 }
 
-                if (Fcand < bestFn) { bestFn = Fcand; bestXls = cand; }
+                if (Fcand < bestFn) { bestFn = Fcand; bestCand = cand; }
 
                 alpha *= 0.5;
-                if (alpha < alphaMin) break;
+                if (alpha < p.lsAlphaMin) break;
             }
 
             if (!accepted) {
-                // 线搜索都不行：增大 gmin，并把 xTry 拉回“最不差的候选”
-                xTry = bestXls;
-                gmin = std::min(gmin * 10.0, 1e-2);
+                // 线搜索失败：回退到最不差的点，并加大 gmin
+                xTry = bestCand;
+                if (bestFn < Fnorm) {
+                    double gbase = ctrl.baseGmin(targetScale);
+                    gmin = 0.7 * gmin + 0.3 * gbase;
+                } else {
+                    double alphaDummy = p.alphaInit;
+                    ctrl.onLinearReject(alphaDummy, gmin);
+                }
             } else {
-                // accepted：gmin 缓慢往 base 拉回（别一直顶在很大）
-                double gminBase = ctrl.baseGmin(targetScale);
-                gmin = 0.7 * gmin + 0.3 * gminBase;
+                // accepted：gmin 往 base 拉回，别一直顶着
+                double gbase = ctrl.baseGmin(targetScale);
+                gmin = 0.7 * gmin + 0.3 * gbase;
             }
         }
 
         if (!stepOK) {
-            // 这个 scale 推不动：缩小 dScale 重试
             dScale *= 0.5;
             std::cerr << "WARNING: Newton (GS) failed at scale=" << targetScale
                       << ", reducing dScale to " << dScale << "\n";
-            if (dScale < minDScale) {
+            if (dScale < p.dScaleMin) {
                 std::cerr << "WARNING: dScale too small, stop continuation at scale=" << goodScale << "\n";
                 return xGood;
             }
             continue;
         }
 
-        // 成功推进一个 step
+        // 成功推进
         xGood = xTry;
         goodScale = targetScale;
 
-        // 如果走得很顺，稍微放大步长
-        dScale = std::min(0.2, dScale * 1.25);
+        // 顺利就加大步长
+        dScale = std::min(p.dScaleMax, dScale * 1.25);
     }
 
     return xGood;
 }
+
 
 
 
@@ -364,51 +368,115 @@ VectorXd DcAnalysis::solveNewtonGS() const {
 //     return dcSolveLU(ckt);
 // }
 
-ConvController::ConvController() : alphaMin(0.02), alphaMax(0.5), gminHighBase(1e-6)
-            , gminLowBase(3.35e-7), gminAbsMax(1e-4), fastConvRatio(0.7), slowConvRatio(1.05) {}
+ConvController ConvController::forDc(DcSolverKind kind) {
+    ConvParams p;
 
+    if (kind == DcSolverKind::LU) {
+        // LU：步子要大一点，别跟 GS 共用 alphaMin=0.02
+        p.alphaInit = 0.825;
+        p.alphaMin  = 0.1;
+        p.alphaMax  = 0.825;
 
-ConvStatus ConvController::update(
-    const Eigen::VectorXd& x, const Eigen::VectorXd& xRaw,
-    double prevErr, int iter, double alphaCurrent, 
-    double gminCurrent, double rampScale, double tol
+        // gmin：允许 early 更大，失败时也允许顶到更高（但最终回到 lowBase）
+        p.gminHighBase = 1e-5;
+        p.gminLowBase  = 3.325e-7;
+        p.gminAbsMax   = 1e-2;
+
+        // DC step/residual 判据
+        p.stepTolStart = 1e-6;
+        p.stepTolFinal = 1e-9;
+        p.fAbsTol      = 1e-12;
+        p.fRelTol      = 1e-8;
+        return ConvController(NonlinearSolveRole::DC_Newton_LU, p);
+    } else {
+        // GS：允许更小 alpha（line-search 也会用到）
+        p.alphaInit = 0.95;
+        p.alphaMin  = 0.02;
+        p.alphaMax  = 0.95;
+
+        p.gminHighBase = 1e-5;
+        p.gminLowBase  = 3.325e-7;
+        p.gminAbsMax   = 1e-2;
+
+        // GS 内线性解验收阈值（你原本写死在 solveNewtonGS）
+        p.linRelTolStart = 5e-3;
+        p.linRelTolFinal = 1e-6;
+
+        p.maxLineSearch = 12;
+        p.armijoC1      = 1e-4;
+        p.lsAlphaMin    = 0.02;
+
+        p.dScaleInit = 0.1;
+        p.dScaleMin  = 1e-3;
+        p.dScaleMax  = 0.2;
+
+        return ConvController(NonlinearSolveRole::DC_Newton_GS, p);
+    }
+}
+
+ConvController ConvController::forHb() {
+    ConvParams p;
+    // HB 通常比 DC 更难：alpha 不要太激进
+    p.alphaInit = 0.5;
+    p.alphaMin  = 0.05;
+    p.alphaMax  = 0.8;
+
+    p.gminHighBase = 1e-3;
+    p.gminLowBase  = 1e-9;
+    p.gminAbsMax   = 1e-2;
+
+    p.stepTolStart = 1e-6;
+    p.stepTolFinal = 1e-9;
+    p.fAbsTol      = 1e-12;
+    p.fRelTol      = 1e-8;
+
+    return ConvController(NonlinearSolveRole::HB_Newton_LU, p);
+}
+
+// 关键：update 里不要 inf-norm / 2-norm 混着用
+ConvStatus ConvController::updateStep(
+    const Eigen::VectorXd& x,
+    const Eigen::VectorXd& xRaw,
+    double prevStep,
+    int iter,
+    double alphaCurrent,
+    double gminCurrent,
+    double rampScale
 ) const {
     ConvStatus st;
-    double alpha = std::clamp(alphaCurrent, alphaMin, alphaMax);
+
+    double alpha = std::clamp(alphaCurrent, p_.alphaMin, p_.alphaMax);
     Eigen::VectorXd dx = xRaw - x;
-    double err = dx.lpNorm<Eigen::Infinity>();
     Eigen::VectorXd xNew = x + alpha * dx;
+
+    // 用一致的 metric：建议 inf-norm
+    double stepNow = (xNew - x).lpNorm<Eigen::Infinity>();
 
     double gminBase = baseGmin(rampScale);
     double gminNext = gminBase;
 
-    if (iter == 0 || !std::isfinite(prevErr)) {
-        // 第一轮：直接靠近 base
+    if (iter == 0 || !std::isfinite(prevStep)) {
         gminNext = gminBase;
     } else {
-        // 从第二轮开始，根据误差变化做一点调节
-        if (err > prevErr * slowConvRatio) {
-            // 收敛明显变差：减小 alpha、略微增大 gmin
-            alpha    = std::max(alpha * 0.7, alphaMin);
-            gminNext = std::min(gminCurrent * 2.0, gminAbsMax);
-        } else if (err < prevErr * fastConvRatio) {
-            // 收敛不错：略微增大 alpha，让牛顿稍微大胆一些，
-            // 并把 gmin 轻轻往 base 拉
-            alpha    = std::min(alpha * 1.1, alphaMax);
+        if (stepNow > prevStep * p_.slowConvRatio) {
+            alpha    = std::max(alpha * 0.7, p_.alphaMin);
+            gminNext = std::min(gminCurrent * 2.0, p_.gminAbsMax);
+        } else if (stepNow < prevStep * p_.fastConvRatio) {
+            alpha    = std::min(alpha * 1.1, p_.alphaMax);
             gminNext = 0.5 * gminCurrent + 0.5 * gminBase;
         } else {
-            // 正常收敛：gmin 缓慢往 base 靠近
             gminNext = 0.7 * gminCurrent + 0.3 * gminBase;
         }
-        xNew = x + alpha * (xRaw - x);
-        err = (xNew - x).norm();
+
+        xNew = x + alpha * dx;
+        stepNow = (xNew - x).lpNorm<Eigen::Infinity>();
     }
 
     st.xNext     = std::move(xNew);
     st.alphaNext = alpha;
     st.gminNext  = gminNext;
-    st.error     = err;
-    st.converged = (err < tol);
-
+    st.error     = stepNow;
+    // “step 收敛”只是一条腿，LU 警告修复要靠 residual（下面 solveNewtonLU 会加）
+    st.converged = false;
     return st;
 }

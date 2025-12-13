@@ -5,6 +5,8 @@
 #include "sim.hpp"
 #include "solver.hpp"
 #include <string>
+#include <algorithm>
+#include <limits>
 
 
 enum class DcSolverKind {
@@ -12,46 +14,125 @@ enum class DcSolverKind {
     GaussSeidel
 };
 
+enum class NonlinearSolveRole {
+    DC_Newton_LU,
+    DC_Newton_GS,
+    HB_Newton_LU
+};
+
+struct ConvParams {
+    // damping / step control
+    double alphaInit = 1.0;
+    double alphaMin  = 0.1;
+    double alphaMax  = 1.0;
+
+    // gmin schedule
+    double gminHighBase = 1e-4;   // scale=0 附近
+    double gminLowBase  = 1e-12;  // scale=1 附近
+    double gminAbsMax   = 1e-2;   // 允许在失败时顶上去（但最终会拉回 base）
+
+    // heuristics
+    double fastConvRatio = 0.7;
+    double slowConvRatio = 1.05;
+
+    // DC: convergence check
+    double stepTolStart = 1e-6;   // scale=0 的 step 容忍
+    double stepTolFinal = 1e-9;   // scale=1 的 step 容忍
+    double fAbsTol      = 1e-12;  // residual: abs
+    double fRelTol      = 1e-8;   // residual: rel * max(1, ||rhs||)
+
+    // GS inner linear-solve acceptance (你原来写在 solveNewtonGS 里的 acceptTol)
+    double linRelTolStart = 5e-3; // scale=0
+    double linRelTolFinal = 1e-6; // scale=1
+
+    // continuation / line-search (你原来写在 solveNewtonGS 里的参数)
+    int    maxLineSearch = 12;
+    double armijoC1      = 1e-4;
+    double lsAlphaMin    = 0.02;
+
+    double dScaleInit = 0.1;
+    double dScaleMin  = 1e-3;
+    double dScaleMax  = 0.2;
+};
 struct ConvStatus {
     Eigen::VectorXd xNext;
-    double alphaNext;
-    double gminNext;
-    double error;
-    bool converged;
+    double alphaNext = 1.0;
+    double gminNext = 0.0;
+    double error = std::numeric_limits<double>::infinity();
+    bool converged = false;
 };
 
 class ConvController {
-private:
-    double alphaMin, alphaMax;
-    double gminHighBase, gminLowBase, gminAbsMax;
-
-    double fastConvRatio;
-    double slowConvRatio;
 public:
-    ConvController();
+    static ConvController forDc(DcSolverKind kind);
+    static ConvController forHb();
+
+    ConvController() = default; // 保留以免你其它地方一堆报错
+    ConvController(NonlinearSolveRole role, const ConvParams& p)
+        : role_(role), p_(p) {}
+
+    const ConvParams& params() const { return p_; }
+
+    // 关键：baseGmin 你原公式写错了，这里修正为线性插值
+    double baseGmin(double rampScale) const {
+        double s = std::clamp(rampScale, 0.0, 1.0);
+        double g = p_.gminHighBase * (1.0 - s) + p_.gminLowBase * s;
+        return std::max(g, 1e-9);   // DC 建议别低于 1e-9，除非你做了“浮动节点检测”
+    }
+
+    double stepTol(double rampScale) const {
+        double s = std::clamp(rampScale, 0.0, 1.0);
+        return p_.stepTolStart * (1.0 - s) + p_.stepTolFinal * s;
+    }
+
+    double linRelTol(double rampScale) const {
+        double s = std::clamp(rampScale, 0.0, 1.0);
+        return p_.linRelTolStart * (1.0 - s) + p_.linRelTolFinal * s;
+    }
+
+    double residualTol(double rhsNorm) const {
+        return p_.fAbsTol + p_.fRelTol * std::max(1.0, rhsNorm);
+    }
+
+    // 线性内解拒绝时的统一策略（你原来散落在 solveNewtonGS 里）
+    void onLinearReject(double& alpha, double& gmin) const {
+        gmin  = std::min(gmin * 10.0, p_.gminAbsMax);
+        alpha = std::max(alpha * 0.5, p_.alphaMin);
+    }
+
+    double initialAlphaLU() const { return std::clamp(p_.alphaInit, p_.alphaMin, p_.alphaMax); }
+    double initialAlphaGS() const { return std::clamp(p_.alphaInit, p_.alphaMin, p_.alphaMax); }
 
     ConvStatus update(
         const Eigen::VectorXd& x,
         const Eigen::VectorXd& xRaw,
         double prevErr,
-        int    iter,
+        int iter,
         double alphaCurrent,
         double gminCurrent,
         double rampScale,
-        double tolStep
-    ) const;
-    // 给定 ramp 进度，计算当前步的基础 gmin
-    double baseGmin(double rampScale) const {
-        rampScale = std::clamp(rampScale, 0.0, 1.0);
-        return gminHighBase * (1.0 - rampScale) + gminLowBase * rampScale;
-;
+        double tol
+    ) const {
+        // 这里 prevErr 在你旧代码里其实是“上一次步长/误差”
+        auto st = updateStep(x, xRaw, prevErr, iter, alphaCurrent, gminCurrent, rampScale);
+        st.converged = std::isfinite(st.error) && (st.error < tol);
+        return st;
     }
 
-    // LU 版的初始 alpha
-    double initialAlphaLU() const { return 0.35; }
+    // LU/GS 都能用的“基于 step 的 update”
+    ConvStatus updateStep(
+        const Eigen::VectorXd& x,
+        const Eigen::VectorXd& xRaw,
+        double prevStep,
+        int iter,
+        double alphaCurrent,
+        double gminCurrent,
+        double rampScale
+    ) const;
 
-    // GS 版可以稍微激进一点
-    double initialAlphaGS() const { return 0.45; }
+private:
+    NonlinearSolveRole role_ = NonlinearSolveRole::DC_Newton_LU;
+    ConvParams p_;
 };
 
 class DcAnalysis {
@@ -182,27 +263,27 @@ private:
     ) const;
 
       // --- 线性部分：频域 Y_k / J_k ---
-    void buildLinearYJ(double omega_k, double gmin,
-                       CMatrix& Yk,
-                       CVector& Jk) const;
+    void buildLinearYJ(int h, double omega_k, double gmin, double sourceScale,
+                       CMatrix& Yk, CVector& Jk) const;
 
     // --- 残差 F(X) ---
     void computeResidualAndTimeDomainJacobian(
-        const Eigen::VectorXd& x, double gmin,
+        const Eigen::VectorXd& x, double gmin, double sourceScale,
         Eigen::VectorXd& F,
         std::vector<Eigen::MatrixXd>& Gnl_t_vec) const;
 
     // 用解析方式构建 Jacobian：
     //   J = ∂F/∂x = (线性 Y_k 部分) + (非线性 gm/gds + Fourier + FFT 部分)
     void buildJacobianAnalytic(
-        const Eigen::VectorXd& x, double gmin,
+        const Eigen::VectorXd& x, double gmin, double sourceScale,
         const std::vector<Eigen::MatrixXd>& Gnl_t_vec,
         Eigen::MatrixXd& J) const;
 
     // Newton 求解 F(x)=0，使用 ConvController 做阻尼 + gmin stepping
-    bool newtonSolve(Eigen::VectorXd& x) const;
+    bool newtonSolve(Eigen::VectorXd& x, double rampScale) const;
 
     void writeHbTimeCsv(const Eigen::VectorXd& x, const std::string& outFile) const;
+public:
     HbAnalysis(const Circuit& ckt,
                const SimulationConfig& sim,
                const Eigen::VectorXd& dcOp);
