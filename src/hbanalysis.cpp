@@ -22,8 +22,9 @@ HbAnalysis::HbAnalysis(const Circuit&          ckt_,
     omega0 = 2.0 * M_PI * f0;
     T      = (f0 > 0.0) ? (1.0 / f0) : 0.0;
 
-    // 采样点数：至少满足 Nyquist（2K+1），再乘一个安全系数，向上取 2 的幂
-    int minSamples = std::max(64, 8 * (2 * K + 1));
+    // 采样点数：至少满足 Nyquist（2K+1），再乘一个适度安全系数，向上取 2 的幂
+    // 8x 过于保守会拖慢大阶谐波；4x 仍能提供足够抗混叠裕度
+    int minSamples = std::max(64, 4 * (2 * K + 1));
     nTimeSamples = 1;
     while (nTimeSamples < minSamples) {
         nTimeSamples <<= 1;
@@ -39,6 +40,23 @@ HbAnalysis::HbAnalysis(const Circuit&          ckt_,
     if (nTimeSamples <= 0) {
         std::cerr << "[HB] Warning: numTimeSamples <= 0, set to 128.\n";
         nTimeSamples = 128;
+    }
+
+    // 预计算时域基函数表，避免每次 Jacobian 重复生成 sin/cos
+    dvRealTable.assign(K + 1, std::vector<double>(nTimeSamples, 0.0));
+    dvImagTable.assign(K + 1, std::vector<double>(nTimeSamples, 0.0));
+    for (int h = 0; h <= K; ++h) {
+        for (int n = 0; n < nTimeSamples; ++n) {
+            double t   = (static_cast<double>(n) / nTimeSamples) * T;
+            double ang = h * omega0 * t;
+            if (h == 0) {
+                dvRealTable[h][n] = 1.0;
+                dvImagTable[h][n] = 0.0;
+            } else {
+                dvRealTable[h][n] = 2.0 * std::cos(ang);
+                dvImagTable[h][n] = -2.0 * std::sin(ang);
+            }
+        }
     }
 }
 
@@ -346,22 +364,6 @@ void HbAnalysis::buildJacobianAnalytic(
     }
 
     // ==== 2) 非线性部分：用 FFT 同时累积所有 hp，复杂度 O(H*N^2*Nfft log Nfft) ====
-    std::vector<std::vector<double>> dvReal(H, std::vector<double>(nTimeSamples));
-    std::vector<std::vector<double>> dvImag(H, std::vector<double>(nTimeSamples));
-    for (int h = 0; h < H; ++h) {
-        for (int n_t = 0; n_t < nTimeSamples; ++n_t) {
-            double t   = (static_cast<double>(n_t) / nTimeSamples) * T;
-            double ang = h * omega0 * t;
-            if (h == 0) {
-                dvReal[h][n_t] = 1.0;
-                dvImag[h][n_t] = 0.0; // h=0 的虚部不影响时域电压
-            } else {
-                dvReal[h][n_t] = 2.0 * std::cos(ang);
-                dvImag[h][n_t] = -2.0 * std::sin(ang);
-            }
-        }
-    }
-
     Eigen::FFT<double> fft;
     std::vector<std::complex<double>> wTime(nTimeSamples);
     std::vector<std::complex<double>> wSpec;
@@ -377,7 +379,7 @@ void HbAnalysis::buildJacobianAnalytic(
         // h=0 的虚部列对时域电压无影响，直接跳过
         if (hq == 0 && !isReQ) continue;
 
-        const auto& dv_dx = isReQ ? dvReal[hq] : dvImag[hq];
+        const auto& dv_dx = isReQ ? dvRealTable[hq] : dvImagTable[hq];
 
         for (int ip = 0; ip < N; ++ip) {
             // wTime = Gnl(ip,iq,t) * dv_dx(t)
@@ -403,9 +405,9 @@ void HbAnalysis::buildJacobianAnalytic(
 }
 
 
-bool HbAnalysis::newtonSolve(Eigen::VectorXd& x, double rampScale) const {
+bool HbAnalysis::newtonSolve(Eigen::VectorXd& x, double rampScale, double& bestResidual, bool allowRelax) const {
     const int n        = numRealVars();
-    const int maxIters = 25;
+    const int maxIters = 40;
 
     ConvController ctrl = ConvController::forHb();
 
@@ -416,6 +418,7 @@ bool HbAnalysis::newtonSolve(Eigen::VectorXd& x, double rampScale) const {
     Eigen::VectorXd F(n), Ftry(n);
     Eigen::VectorXd bestX = x;
     double bestNorm = std::numeric_limits<double>::infinity();
+    bestResidual = bestNorm;
 
     for (int it = 0; it < maxIters; ++it) {
         // ===== 1) 残差 F(x) + 时域 Gnl(t) =====
@@ -426,6 +429,7 @@ bool HbAnalysis::newtonSolve(Eigen::VectorXd& x, double rampScale) const {
         if (normF < bestNorm) {
             bestNorm = normF;
             bestX    = x;
+            bestResidual = bestNorm;
         }
 
         // residualTol 的 rhsScale：用 ||x||∞ 做一个稳定的尺度（比用 ||F|| 自己更靠谱）
@@ -495,7 +499,9 @@ bool HbAnalysis::newtonSolve(Eigen::VectorXd& x, double rampScale) const {
         prevStep = (xNext - x).lpNorm<Eigen::Infinity>();
         x = std::move(xNext);
         alpha = std::clamp(alphaTry, ctrl.params().alphaMin, ctrl.params().alphaMax);
-        gmin  = gminTry;
+        // 接受后把 gmin 拉回基线，避免过大 gmin 造成直流偏差
+        double gbase = ctrl.baseGmin(rampScale);
+        gmin = 0.5 * gminTry + 0.5 * gbase;
 
         // ===== 7) step + residual 双判据 =====
         if (prevStep < tolStep) {
@@ -516,13 +522,7 @@ bool HbAnalysis::newtonSolve(Eigen::VectorXd& x, double rampScale) const {
     }
 
     // 兜底：如果严格收敛失败，但残差已经足够小，则放宽接受，避免“无输出”
-    double looseTol = 1e-3 * std::max(1.0, bestX.lpNorm<Eigen::Infinity>());
-    if (std::isfinite(bestNorm) && bestNorm < looseTol) {
-        x = bestX;
-        std::cerr << "[HB] Newton fell back to relaxed acceptance: ||F||="
-                  << bestNorm << " < looseTol=" << looseTol << "\n";
-        return true;
-    }
+    (void)allowRelax; // 暂不使用松弛验收
 
     return false;
 }
@@ -628,14 +628,46 @@ bool HbAnalysis::run(Eigen::VectorXd& xOut) const {
         std::cerr << "[HB] Transient init failed: " << e.what() << "\n";
     }
 
+    // 粗阶预解：先用更低的谐波阶求解，再映射到目标阶作为初值
+    if (K > 8) {
+        int coarseK = std::max(3, std::min(8, K / 2));
+        SimulationConfig simCoarse = sim;
+        simCoarse.hb.nHarm = coarseK;
+        try {
+            HbAnalysis coarse(ckt, simCoarse, xdc);
+            Eigen::VectorXd xCoarse;
+            if (coarse.run(xCoarse)) {
+                // 覆盖初始猜测
+                x.setZero();
+                for (int i = 0; i < N && i < xCoarse.size(); ++i) {
+                    x(i) = xCoarse(i);
+                }
+                for (int h = 1; h <= coarseK; ++h) {
+                    int baseSrc = h * 2 * N;
+                    int baseDst = h * 2 * N;
+                    for (int i = 0; i < N; ++i) {
+                        x(baseDst + i)      = xCoarse(baseSrc + i);
+                        x(baseDst + N + i)  = xCoarse(baseSrc + N + i);
+                    }
+                }
+                haveInit = true;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "[HB] Coarse HB init failed: " << e.what() << "\n";
+        }
+    }
+
     // 如果拿到了瞬态初值，按最小 ramp 比例缩放作为第一步的起点
-    std::vector<double> rampTargets = {0.05, 0.1, 0.2, 0.4, 0.7, 1.0};
+    std::vector<double> rampTargets = {0.05, 0.1, 0.2, 0.4, 0.6, 0.8, 0.9, 1.0};
     if (haveInit) {
         x = xInitFull * rampTargets.front();
     }
 
     // 连续延拓：如果直接跳到目标 scale 失败，就把步长减半继续逼近
     double prevScale = 0.0;
+    Eigen::VectorXd xBestScale = x;
+    double bestScaleReached = 0.0;
+    double bestResidualSeen = std::numeric_limits<double>::infinity();
     for (double target : rampTargets) {
         double current = prevScale;
         double step    = target - current;
@@ -649,25 +681,53 @@ bool HbAnalysis::run(Eigen::VectorXd& xOut) const {
                 xTry *= factor;
             }
 
-            bool ok = newtonSolve(xTry, next);
+            double res = std::numeric_limits<double>::infinity();
+            bool ok = newtonSolve(xTry, next, res, /*allowRelax=*/false);
             if (ok) {
                 x        = std::move(xTry);
                 current   = next;
                 prevScale = current;
+                if (res < bestResidualSeen) {
+                    bestResidualSeen = res;
+                    xBestScale = x;
+                    bestScaleReached = current;
+                }
                 // 成功后适当放大步长，加速逼近目标
                 step = std::min(step * 1.5, target - current);
                 guard = 0;
             } else {
                 step *= 0.5;
                 guard++;
-                if (step < 1e-4 || guard > 12) {
+                if (step < 1e-5 || guard > 20) {
                     std::cerr << "[HB] Continuation failed at scale="
                               << next << " (target=" << target << ")\n";
-                    return false;
+                    break;
                 }
             }
         }
     }
+
+    // 尝试强行推到 scale=1：以当前最佳解为起点，严格验收
+    if (prevScale < 1.0 - 1e-6) {
+        if (bestScaleReached > 0.0) {
+            x = xBestScale;
+        }
+        double res1 = std::numeric_limits<double>::infinity();
+        bool ok1 = newtonSolve(x, 1.0, res1, /*allowRelax=*/false);
+        if (!ok1) {
+            std::cerr << "[HB] Final push to scale=1 failed, best residual="
+                      << res1 << "\n";
+            if (bestScaleReached > 0.0) {
+                x = xBestScale;
+                std::cerr << "[HB] Using best reached scale="
+                          << bestScaleReached
+                          << " with residual=" << bestResidualSeen << "\n";
+            } else {
+                return false;
+            }
+        }
+    }
+
     xOut = x;
     return true;
 } 

@@ -225,6 +225,8 @@ private:
     double f0;            // 基波频率
     double omega0;        // 2πf0
     double T;             // 1/f0
+    std::vector<std::vector<double>> dvRealTable; // 预计算 cos/sin 表
+    std::vector<std::vector<double>> dvImagTable;
 
     // int numUnknowns()  const { return N; }
     // int numHarmonics() const { return K; }
@@ -280,7 +282,7 @@ private:
         Eigen::MatrixXd& J) const;
 
     // Newton 求解 F(x)=0，使用 ConvController 做阻尼 + gmin stepping
-    bool newtonSolve(Eigen::VectorXd& x, double rampScale) const;
+    bool newtonSolve(Eigen::VectorXd& x, double rampScale, double& bestResidual, bool allowRelax = false) const;
 
     void writeHbTimeCsv(const Eigen::VectorXd& x, const std::string& outFile) const;
 public:

@@ -419,17 +419,18 @@ ConvController ConvController::forHb() {
     // HB 通常比 DC 更难：alpha 不要太激进
     p.alphaInit = 0.5;
     p.alphaMin  = 0.05;
-    p.alphaMax  = 0.8;
+    p.alphaMax  = 0.9;
 
-    p.gminHighBase = 1e-3;
-    p.gminLowBase  = 1e-9;
-    p.gminAbsMax   = 1e-2;
+    // 减小 gmin 以降低偏置误差，允许适度抬升但最终回到极低值
+    p.gminHighBase = 1e-5;
+    p.gminLowBase  = 1e-10;
+    p.gminAbsMax   = 1e-3;
 
     p.stepTolStart = 1e-6;
     p.stepTolFinal = 1e-9;
-    // HB 收敛标准适当放宽，避免小信号被过严的阈值卡住
-    p.fAbsTol      = 1e-10;
-    p.fRelTol      = 1e-6;
+    // HB 收敛标准：保持严格，但略高于 DC 以兼顾稳定性
+    p.fAbsTol      = 1e-11;
+    p.fRelTol      = 5e-7;
 
     return ConvController(NonlinearSolveRole::HB_Newton_LU, p);
 }
