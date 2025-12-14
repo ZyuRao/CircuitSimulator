@@ -220,7 +220,7 @@ void Inductor::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
     if (eqM >= 0) G(k, eqM) -= 1.0;
 }
 
-// MOSFET 牛顿线性化 stamp（修正符号问题）
+// MOSFET 牛顿线性化 stamp（修正符号问题 + 动态源漏互换）
 void MosfetBase::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
                        const Circuit& ckt,
                        const Eigen::VectorXd& x,
@@ -246,6 +246,34 @@ void MosfetBase::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
     double Vs = getV(eqS);
     (void)eqB; // 目前忽略体效应
     // double Vb = getV(eqB);
+
+    // ========【新增】根据端电压动态决定源/漏 ========
+    // 这里直接互换 eqD/eqS 和 Vd/Vs，其余代码完全不动。
+    {
+        if (!isP) {
+            // NMOS：source 取电势更低的一端
+            if (Vd < Vs) {
+                // 互换 D/S 电压
+                double tmpV = Vd;
+                Vd = Vs;
+                Vs = tmpV;
+                // 互换 D/S 对应的方程索引
+                int tmpEq = eqD;
+                eqD = eqS;
+                eqS = tmpEq;
+            }
+        } else {
+            // PMOS：source 取电势更高的一端
+            if (Vd > Vs) {
+                double tmpV = Vd;
+                Vd = Vs;
+                Vs = tmpV;
+                int tmpEq = eqD;
+                eqD = eqS;
+                eqS = tmpEq;
+            }
+        }
+    }
 
     double p = isP ? -1.0 : 1.0;
 
@@ -288,9 +316,9 @@ void MosfetBase::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
     {
         const double gmin = 1e-12;
         if(!on) {
-                Ids0 = 0.0;
-                gm0 = 0.0;
-                gds0 = gmin;
+            Ids0 = 0.0;
+            gm0  = 0.0;
+            gds0 = gmin;
         }
     }
 
@@ -323,7 +351,7 @@ void MosfetBase::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
     //
     // 所以线性化后：
     //   D 节点的离开电流 ≈ gd*Vd + gg*Vg + gs*Vs + cst
-    //   S 节点的离开电流 ≈ -gd*Vd - gg*Vg - gs*Vs - cst
+    //   S 节点的离开电流 ≈ -gd*Vd - gg*Vg - -gs*Vs - cst
     //
     // 而我们的 MNA 形式是  G * v = I，等价于  (所有支路电流之和) + I(source) = 0，
     // 其中 I(source) 是独立源的“负”号。对非线性支路的常数项 cst，我们
@@ -462,6 +490,7 @@ void MosfetBase::evalIdsGmGds(
     const Eigen::VectorXd& nodeVoltages,
     double& Ids, double& gm, double& gds
 ) const {
+    // 网表给的 D/G/S/B 结点编号
     int nD = nodeIds[0];
     int nG = nodeIds[1];
     int nS = nodeIds[2];
@@ -472,88 +501,115 @@ void MosfetBase::evalIdsGmGds(
     int eqS = ckt.nodes[nS].eqIndex;
     int eqB = ckt.nodes[nB].eqIndex;
     (void)eqB;
+
     auto getV = [&](int eq) -> double {
         if (eq < 0 || eq >= nodeVoltages.size()) return 0.0;
         return nodeVoltages(eq);
     };
 
-    double Vd = getV(eqD);
-    double Vg = getV(eqG);
-    double Vs = getV(eqS);
-    double Vb = getV(eqB);
+    // 原始结点电压（保持一份）
+    double Vd0 = getV(eqD);
+    double Vg0 = getV(eqG);
+    double Vs0 = getV(eqS);
+    double Vb0 = getV(eqB);
+    (void)Vb0; // 目前没用到体效应
 
-    double Vgs = Vg - Vs;
-    double Vds = Vd - Vs;
-    double Vbs = Vb - Vs;
-    double Vth_eff = Vth;
+    // p = +1: NMOS, p = -1: PMOS（统一成“等效 NMOS”思路）
+    double p = isP ? -1.0 : 1.0;
 
-    double Vov = Vgs - Vth_eff; // overdrive
-    Ids = 0.0;
-    gm  = 0.0;
-    gds = 0.0;
+    // ========= 1. 先根据电压决定“有效的 D/S”方向 =========
+    //
+    // 等效偏置里我们用：
+    //   Vgs_eff = p * (Vg - Vs_eff)
+    //   Vds_eff = p * (Vd_eff - Vs_eff)
+    // 希望 Vds_eff >= 0，这样模型只需要处理一个象限。
+    //
+    // 对于 NMOS (p=+1)：希望 Vd_eff >= Vs_eff
+    // 对于 PMOS (p=-1)：希望 Vs_eff >= Vd_eff
+    // 统一写成：若 p*(Vd0 - Vs0) < 0 就交换 D/S
+    double Vds_eff_A = p * (Vd0 - Vs0);
+    bool swapped = (Vds_eff_A < 0.0);
 
-    if (!isP) {
-        // NMOS
+    double Vd_eff = Vd0;
+    double Vs_eff = Vs0;
+    if (swapped) {
+        double tmp = Vd_eff;
+        Vd_eff = Vs_eff;
+        Vs_eff = tmp;
+    }
+
+    // ========= 2. 在“有效 D/S”坐标系下计算等效 NMOS 电流和导数 =========
+    double Vgs_eff = p * (Vg0 - Vs_eff);
+    double Vds_eff = p * (Vd_eff - Vs_eff);  // 经过上面的选择，正常情况下 >= 0
+
+    // 先算不带 λ 的 Ids0 / gm0 / gds0
+    double Ids0 = 0.0;
+    double gm0  = 0.0;
+    double gds0 = 0.0;
+    bool on     = false;
+
+    if (Vgs_eff > Vth && Vds_eff >= 0.0) {
+        on = true;
+        double Vov = Vgs_eff - Vth;  // overdrive
         if (Vov <= 0.0) {
-            // 截止区：近似为 0
-            Ids = 0.0;
-            gm  = 0.0;
-            gds = 0.0;
-            return;
-        }
-
-        if (Vds < Vov) {
-            // Triode
-            Ids = K * (Vov * Vds - 0.5 * Vds * Vds);
-            gm  = K * Vds;
-            gds = K * (Vov - Vds);
+            on = false;
         } else {
-            // Saturation
-            Ids = 0.5 * K * Vov * Vov;
-            gm  = K * Vov;
-            gds = 0.0;
+            if (Vds_eff < Vov) {
+                // Triode 区
+                Ids0 = K * (Vov * Vds_eff - 0.5 * Vds_eff * Vds_eff);
+                gds0 = K * (Vov - Vds_eff);  // ∂Ids0/∂Vds_eff
+                gm0  = K * Vds_eff;          // ∂Ids0/∂Vgs_eff
+            } else {
+                // Saturation 区
+                Ids0 = 0.5 * K * Vov * Vov;
+                gds0 = 0.0;
+                gm0  = K * Vov;
+            }
         }
-        // channel-length modulation
-        double lamFactor = 1.0 + lambda * Vds;
-        Ids *= lamFactor;
-        gds  = gds * lamFactor + lambda * Ids;
+    }
+
+    // 关断时给一个很小的 gmin，保证 HB 线性化矩阵不会完全断路
+    const double gmin = 1e-12;
+    if (!on) {
+        Ids0 = 0.0;
+        gm0  = 0.0;
+        gds0 = gmin;
+    }
+
+    // 加上沟道长度调制：Ids_eff = Ids0 * (1 + λ Vds_eff)
+    double factor = 1.0 + lambda * Vds_eff;
+    if (factor < 0.0) factor = 0.0;
+
+    double Ids_eff       = Ids0 * factor;
+    double dId_dVds_eff  = gds0 * factor + Ids0 * lambda;  // ∂Ids_eff/∂Vds_eff
+    double dId_dVgs_eff  = gm0  * factor;                  // ∂Ids_eff/∂Vgs_eff
+
+    // ========= 3. 从“等效 NMOS + 有效 D/S”映射回“原网表 D/S” =========
+    //
+    // 记：
+    //   Ids_model_eff = p * Ids_eff
+    //
+    // 若没有交换（swapped == false）：
+    //   有效 D 就是原来的 D，直接：
+    //     Ids_out = Ids_model_eff
+    //     gm_out  = ∂Ids_out/∂Vg  = dId_dVgs_eff
+    //     gds_out = ∂Ids_out/∂Vd  = dId_dVds_eff
+    //
+    // 若交换了（有效 D 在原来的 S 端）：
+    //   原 D 端电流 = - Ids_model_eff
+    //   用链式法则可以推到：
+    //     gm_out  = - dId_dVgs_eff
+    //     gds_out =  dId_dVgs_eff + dId_dVds_eff
+    //   并且 ∂Ids/∂Vs = -gm_out - gds_out 仍然成立，
+    //   和 stampNonlinearConductance 里的公式兼容。
+    if (!swapped) {
+        Ids = p * Ids_eff;
+        gm  = dId_dVgs_eff;
+        gds = dId_dVds_eff;
     } else {
-        // PMOS：用等效 NMOS 模型，变量变换 Vsg, Vsd
-        double Vsg = -(Vgs); // = Vs - Vg
-        double Vsd = -(Vds); // = Vs - Vd
-        double Vov_p = Vsg - Vth_eff;
-
-        if (Vov_p <= 0.0) {
-            Ids = 0.0;
-            gm  = 0.0;
-            gds = 0.0;
-            return;
-        }
-
-        if (Vsd < Vov_p) {
-            double Id_abs = K * (Vov_p * Vsd - 0.5 * Vsd * Vsd);
-            double gm_abs = K * Vsd;
-            double gds_abs= K * (Vov_p - Vsd);
-            double lamFactor = 1.0 + lambda * Vsd;
-            Id_abs *= lamFactor;
-            gds_abs = gds_abs * lamFactor + lambda * Id_abs;
-
-            // 转回 D->S 方向：Ids = -Id_abs
-            Ids = -Id_abs;
-            gm  = -gm_abs;   // ∂Ids/∂Vgs
-            gds = -gds_abs;  // ∂Ids/∂Vds
-        } else {
-            double Id_abs = 0.5 * K * Vov_p * Vov_p;
-            double gm_abs = K * Vov_p;
-            double gds_abs= 0.0;
-            double lamFactor = 1.0 + lambda * Vsd;
-            Id_abs *= lamFactor;
-            gds_abs = gds_abs * lamFactor + lambda * Id_abs;
-
-            Ids = -Id_abs;
-            gm  = -gm_abs;
-            gds = -gds_abs;
-        }
+        Ids = -p * Ids_eff;
+        gm  = -dId_dVgs_eff;
+        gds =  dId_dVgs_eff + dId_dVds_eff;
     }
 }
 

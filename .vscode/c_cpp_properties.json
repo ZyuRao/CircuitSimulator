@@ -9,7 +9,8 @@
       "intelliSenseMode": "linux-gcc-x64",
       "compileCommands": "${workspaceFolder}/build/compile_commands.json",
       "includePath": [
-        "${workspaceFolder}/include"
+        "${workspaceFolder}/include",
+        "E:/eigen-5.0.0/*"
       ],
       "defines": [
         "_USE_MATH_DEFINES"

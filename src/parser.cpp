@@ -308,15 +308,15 @@ void NetlistParser::parseVoltageSource(const Statement& st) {
         return;
     }
 
-    // 小工具：解析 "SIN v0 va freq [td [phi]]"
+    // 小工具：解析 "SIN v0 va freq [phi]"
     auto parseSIN = [&](int sinIdx) {
         if (toLower(t[sinIdx]) != "sin") return;
 
-        int need = sinIdx + 3; // 至少 SIN + 3 个参数
-        if (t.size() < (std::size_t)need + 1) {
+        // 至少：SIN v0 va freq
+        if (t.size() < static_cast<std::size_t>(sinIdx + 4)) {
             std::cerr << "Line " << st.lineNo
-                      << ": SIN needs at least 3 parameters (v0 va freq): "
-                      << st.raw << "\n";
+                    << ": SIN needs at least 3 parameters (v0 va freq): "
+                    << st.raw << "\n";
             return;
         }
 
@@ -326,16 +326,24 @@ void NetlistParser::parseVoltageSource(const Statement& st) {
             sin.va   = parseSpiceNumber(t[sinIdx + 2]);
             sin.freq = parseSpiceNumber(t[sinIdx + 3]);
 
-            if ((int)t.size() > sinIdx + 4) {
-                sin.td = parseSpiceNumber(t[sinIdx + 4]);
+            int base   = sinIdx + 4;
+            int remain = static_cast<int>(t.size()) - base;
+
+            // 关键修复：只给 1 个参数时，解释为 phi（deg）
+            if (remain == 1) {
+                double DEG2RAD = 3.14159265358979323846 / 180.0;
+                sin.phi = parseSpiceNumber(t[base]) * DEG2RAD;
+                sin.td  = 0.0;
+            } else if (remain >= 2) {
+                double DEG2RAD = 3.14159265358979323846 / 180.0;
+                sin.td  = parseSpiceNumber(t[base]);
+                sin.phi = parseSpiceNumber(t[base + 1]) * DEG2RAD;
             }
-            if ((int)t.size() > sinIdx + 5) {
-                sin.phi = parseSpiceNumber(t[sinIdx + 5]);
-            }
+            // 其余参数（如 theta 等）暂不支持，忽略
         } catch (const std::exception& e) {
             std::cerr << "Line " << st.lineNo
-                      << ": cannot parse SIN parameters: " << e.what()
-                      << " in '" << st.raw << "'\n";
+                    << ": cannot parse SIN parameters: " << e.what()
+                    << " in '" << st.raw << "'\n";
             return;
         }
 
