@@ -331,24 +331,21 @@ void TransientAnalysis::runBackwardEuler() {
                 int eqS = ckt.nodes[nS].eqIndex;
                 int eqB = ckt.nodes[nB].eqIndex;
 
-                // 简单实现：用 Cj0 近似构造 Cgs/Cgd/Cs/Cd
+                double Cg0 = m->getCg0();
                 double Cj0 = m->getCj0();
-                double Cgs = 0.5 * Cj0;
-                double Cgd = 0.5 * Cj0;
+                double Cgs = Cg0;
+                double Cgd = Cg0;
                 double CsJ = Cj0;
                 double CdJ = Cj0;
 
                 const MosCapState& stPrev = mosPrev[m.get()];
 
-                // Gate-source 电容
-                stampCapBE(eqG, eqS, Cgs, dt, stPrev.vgsPrev, G, I);
-                // Gate-drain 电容
-                stampCapBE(eqG, eqD, Cgd, dt, stPrev.vgdPrev, G, I);
-                // Source-bulk 结电容
-                stampCapBE(eqS, eqB, CsJ, dt, stPrev.vsbPrev, G, I);
-                // Drain-bulk 结电容
-                stampCapBE(eqD, eqB, CdJ, dt, stPrev.vdbPrev, G, I);
+                if (Cgs > 0.0) stampCapBE(eqG, eqS, Cgs, dt, stPrev.vgsPrev, G, I);
+                if (Cgd > 0.0) stampCapBE(eqG, eqD, Cgd, dt, stPrev.vgdPrev, G, I);
+                if (CsJ > 0.0) stampCapBE(eqS, eqB, CsJ, dt, stPrev.vsbPrev, G, I);
+                if (CdJ > 0.0) stampCapBE(eqD, eqB, CdJ, dt, stPrev.vdbPrev, G, I);
             }
+
 
             // 6) gmin 到地，和 DC 保持一致
             stampGlobalGmin(ckt, G, gmin);
@@ -704,8 +701,9 @@ void TransientAnalysis::runTrapezoidal(){
                 int eqB = ckt.nodes[nB].eqIndex;
 
                 double Cj0 = m->getCj0();
-                double Cgs = 0.5 * Cj0;
-                double Cgd = 0.5 * Cj0;
+                double Cg0 = m->getCg0();
+                double Cgs = Cg0;
+                double Cgd = Cg0;
                 double CsJ = Cj0;
                 double CdJ = Cj0;
 
@@ -802,8 +800,9 @@ void TransientAnalysis::runTrapezoidal(){
             double vB = getNodeVoltage(ckt, x, nB);
 
             double Cj0 = m->getCj0();
-            double Cgs = 0.5 * Cj0;
-            double Cgd = 0.5 * Cj0;
+            double Cg0 = m->getCg0();
+            double Cgs = Cg0;
+            double Cgd = Cg0;
             double CsJ = Cj0;
             double CdJ = Cj0;
 
@@ -1020,8 +1019,9 @@ VectorXd TransientAnalysis::integrateOnePeriodBE(
                 int eqB = ckt.nodes[nB].eqIndex;
 
                 double Cj0 = m->getCj0();
-                double Cgs = 0.5 * Cj0;
-                double Cgd = 0.5 * Cj0;
+                double Cg0 = m->getCg0();
+                double Cgs = Cg0;
+                double Cgd = Cg0;
                 double CsJ = Cj0;
                 double CdJ = Cj0;
 

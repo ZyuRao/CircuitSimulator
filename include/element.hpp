@@ -142,16 +142,20 @@ protected:
     double K;
     double lambda;
     double Cj0;
+    double Cg0;
 
 public:
     MosfetBase(const std::string& n,
                int nd, int ng, int ns, int nb,
                bool isPchannel,
-               double Vth_ , double K_, double lambda_, double Cj0_   )
+               double Vth_ , double K_, double lambda_, double Cg0_, double Cj0_   )
         : Element(n, {nd, ng, ns, nb}),
           isP(isPchannel),
           Vth(Vth_),
-          K(K_) , lambda(lambda_), Cj0(Cj0_) {}
+          K(K_) , lambda(lambda_),
+          Cg0(Cg0_), Cj0(Cj0_) {}
+
+    double getCg0() const { return Cg0; }
     
     double getCj0() const { return Cj0; }
 
@@ -171,14 +175,14 @@ public:
 class NMosElement : public MosfetBase {
 public:
     NMosElement(const std::string& n, int nd, int ng, int ns, int nb,
-        double Vth_ , double K_, double lambda_, double Cj0_)
-        : MosfetBase(n, nd, ng, ns, nb, false, Vth_, K_, lambda_, Cj0_) {}
+        double Vth_ , double K_, double lambda_, double Cg0_, double Cj0_)
+        : MosfetBase(n, nd, ng, ns, nb, false, Vth_, K_, lambda_, Cg0_, Cj0_) {}
 };
 
 class PMosElement : public MosfetBase {
 public:
     PMosElement(const std::string& n, int nd, int ng, int ns, int nb,
-        double Vth_ , double K_, double lambda_, double Cj0_)
-        : MosfetBase(n, nd, ng, ns, nb, true, Vth_, K_, lambda_, Cj0_) {}
+        double Vth_ , double K_, double lambda_, double Cg0_, double Cj0_)
+        : MosfetBase(n, nd, ng, ns, nb, true, Vth_, K_, lambda_, Cg0_, Cj0_) {}
 };
 

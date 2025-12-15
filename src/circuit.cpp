@@ -125,47 +125,61 @@ void Circuit::addVoltageSource(const std::string& name,
     nodes[idm].attachedElements.push_back(idx);
 }
 
-void Circuit::addMosfet(
-    const std::string& name, const std::string& nd, 
-    const std::string& ng, const std::string& ns,
-    const std::string& modelId, double W, double L
-) {
+void Circuit::addMosfet(const std::string& name,
+                        const std::string& drain,
+                        const std::string& gate,
+                        const std::string& source,
+                        const std::string& modelId,
+                        double W,
+                        double L)
+{
     const MosModel* m = findMosModel(modelId);
-    if(!m) {
-        std::cerr << "Unknown MOS model: " << modelId << "\n";
-        return;
+    if (!m) {
+        throw std::runtime_error("Unknown MOS model: " + modelId);
     }
 
-    int idd = getOrCreateNode(nd);
-    int idg = getOrCreateNode(ng);
-    int ids = getOrCreateNode(ns);
-    int idb = getOrCreateNode("0");
+    int idd = getOrCreateNode(drain);
+    int idg = getOrCreateNode(gate);
+    int ids = getOrCreateNode(source);
 
-    double K = m->MU * m->COX * (W/L);
+    // 你的网表是 3 节点 MOS：默认 bulk = source
+    int idb = ids;
+
     double Vth_mag = std::abs(m->VT);
+
+    double K = 0.0;
+    if (L > 0.0) {
+        K = m->MU * m->COX * (W / L);
+    }
+
     double lambda = m->LAMBDA;
-    double CJo = m->CJO;
+
+    // 按你给的公式：结电容直接用 CJ0，不乘 W*L
+    double Cj0 = m->CJO;
+
+    // 按你给的公式：Cg0 = Cox * W * L
+    double Cg0 = 0.0;
+    if (m->COX > 0.0 && W > 0.0 && L > 0.0) {
+        Cg0 = 0.5 * m->COX * W * L;
+    }
 
     std::shared_ptr<Element> e;
     if (m->isP) {
-        e = std::make_shared<PMosElement>(
-            name, idd, idg, ids, idb, Vth_mag, K, 
-            lambda, CJo
-        );
+        e = std::make_shared<PMosElement>(name, idd, idg, ids, idb, Vth_mag, K, lambda, Cg0, Cj0);
     } else {
-        e = std::make_shared<NMosElement>(
-            name, idd, idg, ids, idb, Vth_mag, K, 
-            lambda, CJo
-        );
+        e = std::make_shared<NMosElement>(name, idd, idg, ids, idb, Vth_mag, K, lambda, Cg0, Cj0);
     }
 
-    int idx = static_cast<int>(elements.size());
+    int idx = (int)elements.size();
     elements.push_back(e);
+
+    // 附着关系：bulk=source 时不额外重复挂载
     nodes[idd].attachedElements.push_back(idx);
     nodes[idg].attachedElements.push_back(idx);
     nodes[ids].attachedElements.push_back(idx);
-    nodes[idb].attachedElements.push_back(idx);
+    if (idb != ids) nodes[idb].attachedElements.push_back(idx);
 }
+
 
 void Circuit::addMosModel(const MosModel& m) {
     mosModels[m.name] = m;

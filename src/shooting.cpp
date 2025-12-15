@@ -266,10 +266,10 @@ VectorXd integrateOnePeriodPssBE(const Circuit& ckt,
                 int eqB = ckt.nodes[nB].eqIndex;
 
                 double Cj0 = m->getCj0();
-                if (Cj0 <= 0.0) continue;
+                double Cg0 = m->getCg0();
 
-                double Cgs = 0.5 * Cj0;
-                double Cgd = 0.5 * Cj0;
+                double Cgs = Cg0;
+                double Cgd = Cg0;
                 double CsJ = Cj0;
                 double CdJ = Cj0;
 

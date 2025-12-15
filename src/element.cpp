@@ -476,7 +476,7 @@ void MosfetBase::stampAC(Eigen::MatrixXcd& Y, Eigen::VectorXcd& J,
     int eqB = ckt.nodes[nB].eqIndex;
 
     // 你 HB 里现在用的模型：Cj0 常数拆分
-    double Cgs = 0.5 * Cj0, Cgd = 0.5 * Cj0;
+    double Cgs = 1.0 * Cg0, Cgd = 1.0 * Cg0;
     double Csb = 1.0 * Cj0, Cdb = 1.0 * Cj0;
 
     stampCap(eqG, eqS, Cgs);

@@ -190,7 +190,8 @@ void HbAnalysis::evalMosCapChargeAtTime(
         int eqB = ckt.nodes[nB].eqIndex;
         //MOS的寄生电容模型
         double Cj0 = m->getCj0();
-        double Cgs = 0.5 * Cj0, Cgd = 0.5 * Cj0,
+        double Cg0 = m->getCg0();
+        double Cgs = Cg0, Cgd = Cg0,
                CsJ = Cj0, CdJ = Cj0;
 
         addCapCharge(eqG, eqS, Cgs);//Gate-source
