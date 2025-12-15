@@ -210,6 +210,11 @@ struct PrintCommand {
     std::vector<ProbeSpec> probes;
 };
 
+struct ProbeCommand {
+    AnalysisType analysis = AnalysisType::NONE;
+    std::vector<ProbeSpec> probes;
+};
+
 class SimulationConfig {
 public:
     bool doOp = false;
@@ -218,6 +223,10 @@ public:
     AcConfig ac;
     HbConfig hb;
     std::vector<PrintCommand> printCommands;
+    std::vector<ProbeCommand> probeCommands;
+
+    // Probes declared via .PLOTNV / .PLOTNC (global, apply to all analyses)
+    std::vector<ProbeSpec> plotProbes;
 
 
     bool hasAnyAnalysis() const {

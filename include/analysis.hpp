@@ -1,12 +1,13 @@
 #pragma once
 
-#include<Eigen/Dense>
+#include <Eigen/Dense>
 #include "circuit.hpp"
 #include "sim.hpp"
 #include "solver.hpp"
 #include <string>
 #include <algorithm>
 #include <limits>
+#include <functional>
 
 
 enum class DcSolverKind {

@@ -58,6 +58,7 @@ private:
     void parseAcCard   (const Statement& st);
     void parseHbCard   (const Statement& st);
     void parsePrintCard(const Statement& st);
+    void parseProbeCard(const Statement& st);
     void parsePlotNvCard (const Statement& st);
     void parsePlotNcCard(const Statement& st);
     void parseModelCard(const Statement& st);
@@ -73,6 +74,5 @@ inline bool parseNetlist(
     sim.ensureDefaultOp();
     return ok;
 }
-
 
 

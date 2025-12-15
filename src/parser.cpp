@@ -461,6 +461,8 @@ void NetlistParser::parseDotCard(const Statement& st) {
         parseAcCard(st);
     } else if (head == ".print") {
         parsePrintCard(st);
+    } else if (head == ".probe") {
+        parseProbeCard(st);
     } else if (head == ".model") {
         parseModelCard(st);
     } else if (head == ".hb") {
@@ -659,6 +661,28 @@ void NetlistParser::parsePrintCard(const Statement& st) {
     sim.printCommands.push_back(std::move(pc));
 }
 
+void NetlistParser::parseProbeCard(const Statement& st) {
+    const auto& t = st.tokens;
+    if (t.size() < 3) {
+        std::cerr << "Line " << st.lineNo << ": invalid .PROBE: " << st.raw << "\n";
+        return;
+    }
+
+    ProbeCommand pc;
+    pc.analysis = parseAnalysisTypeFromToken(t[1]);
+    if (pc.analysis == AnalysisType::NONE) {
+        std::cerr << "Line " << st.lineNo << ": unknown analysis type in .PROBE: "
+                  << t[1] << " in '" << st.raw << "'\n";
+        return;
+    }
+
+    for (std::size_t i = 2; i < t.size(); ++i) {
+        ProbeSpec p = parseProbeToken(t[i]);
+        pc.probes.push_back(std::move(p));
+    }
+    sim.probeCommands.push_back(std::move(pc));
+}
+
 void NetlistParser::parsePlotNvCard(const Statement& st) {
     const auto& t = st.tokens;
     if (t.size() < 2) {
@@ -666,18 +690,13 @@ void NetlistParser::parsePlotNvCard(const Statement& st) {
                   << ": invalid .PLOTNV: " << st.raw << "\n";
         return;
     }
-    PrintCommand pc;
-    pc.analysis = AnalysisType::NONE;//不绑定分析类型
-
-    for(std::size_t i = 1; i < t.size(); i++) {
+    for (std::size_t i = 1; i < t.size(); i++) {
         const std::string& nodeName = t[i];
         if(nodeName.empty()) continue;
 
         ProbeSpec p = parseProbeToken("V(" + nodeName + ")");
-        pc.probes.push_back(std::move(p));
+        sim.plotProbes.push_back(std::move(p));
     }
-
-    if(!pc.probes.empty()) sim.printCommands.push_back(std::move(pc));
 }
 
 void NetlistParser::parsePlotNcCard(const Statement& st) {
@@ -687,9 +706,6 @@ void NetlistParser::parsePlotNcCard(const Statement& st) {
                   << ": invalid .PLOTNC: " << st.raw << "\n";
         return;
     }
-
-    PrintCommand pc;
-    pc.analysis = AnalysisType::NONE; 
 
     auto findParen = [](const std::string& s) -> std::pair<int, int> {
         int l = -1, r = -1;
@@ -721,12 +737,8 @@ void NetlistParser::parsePlotNcCard(const Statement& st) {
             p.eleName = rtrimLocal(ltrim(name));
             p.elePort = rtrimLocal(ltrim(inside));
         }
-        pc.probes.push_back(std::move(p));
+        sim.plotProbes.push_back(std::move(p));
 
-    }
-
-    if(!pc.probes.empty()) {
-        sim.printCommands.push_back(std::move(pc));
     }
 }
 
