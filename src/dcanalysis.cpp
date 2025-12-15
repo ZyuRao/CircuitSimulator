@@ -417,14 +417,14 @@ ConvController ConvController::forDc(DcSolverKind kind) {
 ConvController ConvController::forHb() {
     ConvParams p;
     // HB 通常比 DC 更难：alpha 不要太激进
-    p.alphaInit = 0.5;
-    p.alphaMin  = 0.05;
+    p.alphaInit = 0.65;
+    p.alphaMin  = 0.5;
     p.alphaMax  = 0.9;
 
     // 减小 gmin 以降低偏置误差，允许适度抬升但最终回到极低值
-    p.gminHighBase = 1e-5;
-    p.gminLowBase  = 1e-10;
-    p.gminAbsMax   = 1e-3;
+    p.gminHighBase = 1e-3;
+    p.gminLowBase  = 3.325e-7;
+    p.gminAbsMax   = 1e-2;
 
     p.stepTolStart = 1e-6;
     p.stepTolFinal = 1e-9;
