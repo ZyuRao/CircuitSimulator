@@ -681,6 +681,7 @@ void NetlistParser::parseProbeCard(const Statement& st) {
         pc.probes.push_back(std::move(p));
     }
     sim.probeCommands.push_back(std::move(pc));
+    sim.enablePlot = true;
 }
 
 void NetlistParser::parsePlotNvCard(const Statement& st) {

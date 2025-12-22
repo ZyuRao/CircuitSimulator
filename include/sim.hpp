@@ -227,6 +227,7 @@ public:
 
     // Probes declared via .PLOTNV / .PLOTNC (global, apply to all analyses)
     std::vector<ProbeSpec> plotProbes;
+    bool enablePlot = false;
 
 
     bool hasAnyAnalysis() const {

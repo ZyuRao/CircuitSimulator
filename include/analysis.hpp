@@ -8,6 +8,9 @@
 #include <algorithm>
 #include <limits>
 #include <functional>
+#include <memory>
+
+class TimingRegistry;
 
 
 enum class DcSolverKind {
@@ -141,6 +144,10 @@ private:
     const Circuit& ckt;
     const SimulationConfig& sim;
     DcSolverKind solverKind;
+    TimingRegistry* timings = nullptr;
+    struct DcWorkspace;
+    mutable std::unique_ptr<DcWorkspace> workspace;
+    mutable double linearStampScale = std::numeric_limits<double>::quiet_NaN();
 
     // 小工具：构造 DC 的 AnalysisContext
     static AnalysisContext makeDcCtx(double sourceScale);  
@@ -151,11 +158,16 @@ private:
 
     Eigen::VectorXd solveNewtonLU() const;
     Eigen::VectorXd solveNewtonGS() const;
+    void initWorkspace(int N) const;
+    DcWorkspace& ws(int N) const;
+    void buildLinearStamp(int N, double sourceScale) const;
 
 public:
     explicit DcAnalysis(const Circuit& ckt_,
                         const SimulationConfig& SimulationConfig,
-                        DcSolverKind solver_ = DcSolverKind::GaussSeidel);
+                        DcSolverKind solver_ = DcSolverKind::GaussSeidel,
+                        TimingRegistry* timings_ = nullptr);
+    ~DcAnalysis();
 
     // 对外唯一入口：自动判断是否有非线性器件，调用合适的路径
     Eigen::VectorXd run();
@@ -169,7 +181,8 @@ class TransientAnalysis {
 public:
     TransientAnalysis(const Circuit& ckt,
                       const SimulationConfig& sim,
-                      const std::string& outFile = "tran_out.csv");
+                      const std::string& outFile = "tran_out.csv",
+                      TimingRegistry* timings_ = nullptr);
 
     void runBackwardEuler();
 
@@ -186,6 +199,7 @@ private:
     const Circuit& ckt;
     const SimulationConfig& sim;
     std::string outFile;
+    TimingRegistry* timings = nullptr;
         
     friend class DcAnalysis;
      // 从 DC 求工作点：内部直接用 DcAnalysis
@@ -219,6 +233,7 @@ private:
     const Circuit& ckt;
     const SimulationConfig& sim;
     Eigen::VectorXd xdc;   // DC 工作点
+    TimingRegistry* timings = nullptr;
 
     int    N;             // MNA unknown 数
     int    K;             // 谐波阶数（sim.hb.nHarm）
@@ -228,6 +243,9 @@ private:
     double T;             // 1/f0
     std::vector<std::vector<double>> dvRealTable; // 预计算 cos/sin 表
     std::vector<std::vector<double>> dvImagTable;
+    struct HbWorkspace;
+    mutable std::unique_ptr<HbWorkspace> workspace;
+    mutable double linearCacheScale = std::numeric_limits<double>::quiet_NaN();
 
     // int numUnknowns()  const { return N; }
     // int numHarmonics() const { return K; }
@@ -258,12 +276,16 @@ private:
         // 在某个时刻，根据 v(t) 评估所有 MOS 的非线性电流，组成 Inl
     void evalNonlinearCurrentsAtTime(const Eigen::VectorXd& v_t,
         Eigen::VectorXd& Inl_t,
-        Eigen::MatrixXd& Gnl_t) const;
+        Eigen::MatrixXd* Gnl_t) const;
 
     void evalMosCapChargeAtTime(
         const Eigen::VectorXd& v_t,
         Eigen::VectorXd& Qcap_t
     ) const;
+
+    void prepareLinearCache(double sourceScale) const;
+    void initWorkspace();
+    HbWorkspace& ws() const;
 
       // --- 线性部分：频域 Y_k / J_k ---
     void buildLinearYJ(int h, double omega_k, double gmin, double sourceScale,
@@ -273,7 +295,7 @@ private:
     void computeResidualAndTimeDomainJacobian(
         const Eigen::VectorXd& x, double gmin, double sourceScale,
         Eigen::VectorXd& F,
-        std::vector<Eigen::MatrixXd>& Gnl_t_vec) const;
+        bool needGnl) const;
 
     // 用解析方式构建 Jacobian：
     //   J = ∂F/∂x = (线性 Y_k 部分) + (非线性 gm/gds + Fourier + FFT 部分)
@@ -289,7 +311,9 @@ private:
 public:
     HbAnalysis(const Circuit& ckt,
                const SimulationConfig& sim,
-               const Eigen::VectorXd& dcOp);
+               const Eigen::VectorXd& dcOp,
+               TimingRegistry* timings_ = nullptr);
+    ~HbAnalysis();
     bool run(Eigen::VectorXd& xOut, const std::string& outFile) const;
     bool run(Eigen::VectorXd& xOut) const;
 };
@@ -311,12 +335,7 @@ public:
 
 // 判定电路中是否存在非线性器件（目前只看 MOS）
 inline static bool hasNonlinearDevices(const Circuit& ckt) {
-    for (const auto& e : ckt.elements) {
-        if (std::dynamic_pointer_cast<MosfetBase>(e)) {
-            return true;
-        }
-    }
-    return false;
+    return !ckt.elementCache().mos.empty();
 }
 
 // ========= 小工具：取节点电压 =========

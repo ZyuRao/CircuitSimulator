@@ -13,6 +13,7 @@ if (NOT CMAKE_BUILD_TYPE)
 endif()
 
 find_package(Eigen3 3.4 REQUIRED NO_MODULE)
+find_package(OpenMP)
 
 
 # 添加源代码文件
@@ -49,6 +50,11 @@ if(CSIM_FAST_MATH)
   )
 endif()
 
+option(CSIM_ENABLE_PROF "Enable lightweight profiling timers" OFF)
+if(CSIM_ENABLE_PROF)
+  target_compile_definitions(CircuitSimulator PRIVATE ENABLE_PROF)
+endif()
+
 # 将 include 文件夹加入头文件搜索路径
 target_include_directories(${PROJECT_NAME}
     PRIVATE
@@ -59,6 +65,10 @@ target_link_libraries(${PROJECT_NAME}
     PRIVATE
         Eigen3::Eigen
 )
+
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(${PROJECT_NAME} PRIVATE OpenMP::OpenMP_CXX)
+endif()
 
 
 

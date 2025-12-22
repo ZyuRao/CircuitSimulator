@@ -4,6 +4,8 @@
 #include <unordered_map>
 #include <memory>
 #include <string>
+#include <optional>
+#include <mutex>
 #include "element.hpp"
 #include "utils.hpp"
 
@@ -60,6 +62,22 @@ public:
 
     const MosModel* findMosModel(const std::string& id) const;
 
+    struct ElementCache {
+        std::vector<const MosfetBase*> mos;
+        std::vector<const Resistor*> resistors;
+        std::vector<const CapacitorElement*> capacitors;
+        std::vector<const Inductor*> inductors;
+        std::vector<const VoltageSource*> voltageSources;
+        std::vector<const CurrentSource*> currentSources;
+    };
+
+    const ElementCache& elementCache() const;
+
     // 打印电路连接信息
     void printConnectivity() const;
+
+private:
+    void invalidateCache();
+    mutable std::optional<ElementCache> cache_;
+    mutable std::mutex cacheMutex_;
 };

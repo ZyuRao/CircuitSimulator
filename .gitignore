@@ -68,3 +68,5 @@ Thumbs.db
 # ===== Local configs / outputs that differ per developer =====
 *.json
 *.csv
+*.txt
+*.log

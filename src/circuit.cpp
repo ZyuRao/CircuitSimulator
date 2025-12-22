@@ -39,6 +39,11 @@ int Circuit::numUnknowns() const {
     return numNodeEquations() + numVoltageBranches();
 }
 
+void Circuit::invalidateCache() {
+    std::lock_guard<std::mutex> lock(cacheMutex_);
+    cache_.reset();
+}
+
 void Circuit::assignEquationIndices() {
     int eq = 0;
     // 节点电压未知量
@@ -64,6 +69,7 @@ void Circuit::addResistor(const std::string& name,
                           const std::string& n1,
                           const std::string& n2,
                           double value) {
+    invalidateCache();
     int id1 = getOrCreateNode(n1);
     int id2 = getOrCreateNode(n2);
     auto e = std::make_shared<Resistor>(name, id1, id2, value);
@@ -77,6 +83,7 @@ void Circuit::addCapacitor(const std::string& name,
                            const std::string& n1,
                            const std::string& n2,
                            double value) {
+    invalidateCache();
     int id1 = getOrCreateNode(n1);
     int id2 = getOrCreateNode(n2);
     auto e = std::make_shared<CapacitorElement>(name, id1, id2, value);
@@ -90,6 +97,7 @@ void Circuit::addInductor(const std::string& name,
                           const std::string& n1,
                           const std::string& n2,
                           double value) {
+    invalidateCache();
     int id1 = getOrCreateNode(n1);
     int id2 = getOrCreateNode(n2);
     auto e = std::make_shared<Inductor>(name, id1, id2, value);
@@ -103,6 +111,7 @@ void Circuit::addCurrentSource(const std::string& name,
                                const std::string& np,
                                const std::string& nm,
                                const SourceSpec& spec) {
+    invalidateCache();
     int idp = getOrCreateNode(np);
     int idm = getOrCreateNode(nm);
     auto e = std::make_shared<CurrentSource>(name, idp, idm, spec);
@@ -116,6 +125,7 @@ void Circuit::addVoltageSource(const std::string& name,
                                const std::string& np,
                                const std::string& nm,
                                const SourceSpec& spec) {
+    invalidateCache();
     int idp = getOrCreateNode(np);
     int idm = getOrCreateNode(nm);
     auto e = std::make_shared<VoltageSource>(name, idp, idm, spec);
@@ -133,6 +143,7 @@ void Circuit::addMosfet(const std::string& name,
                         double W,
                         double L)
 {
+    invalidateCache();
     const MosModel* m = findMosModel(modelId);
     if (!m) {
         throw std::runtime_error("Unknown MOS model: " + modelId);
@@ -183,6 +194,40 @@ void Circuit::addMosfet(const std::string& name,
 
 void Circuit::addMosModel(const MosModel& m) {
     mosModels[m.name] = m;
+}
+
+const Circuit::ElementCache& Circuit::elementCache() const {
+    std::lock_guard<std::mutex> lock(cacheMutex_);
+    if (cache_) return *cache_;
+
+    cache_.emplace();
+    for (const auto& e : elements) {
+        if (auto m = std::dynamic_pointer_cast<MosfetBase>(e)) {
+            cache_->mos.push_back(m.get());
+            continue;
+        }
+        if (auto r = std::dynamic_pointer_cast<Resistor>(e)) {
+            cache_->resistors.push_back(r.get());
+            continue;
+        }
+        if (auto c = std::dynamic_pointer_cast<CapacitorElement>(e)) {
+            cache_->capacitors.push_back(c.get());
+            continue;
+        }
+        if (auto L = std::dynamic_pointer_cast<Inductor>(e)) {
+            cache_->inductors.push_back(L.get());
+            continue;
+        }
+        if (auto vs = std::dynamic_pointer_cast<VoltageSource>(e)) {
+            cache_->voltageSources.push_back(vs.get());
+            continue;
+        }
+        if (auto is = std::dynamic_pointer_cast<CurrentSource>(e)) {
+            cache_->currentSources.push_back(is.get());
+            continue;
+        }
+    }
+    return *cache_;
 }
 
 void Circuit::printConnectivity() const {

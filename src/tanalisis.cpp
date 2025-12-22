@@ -12,6 +12,7 @@
 #include "element.hpp"
 #include "sim.hpp"
 #include "solver.hpp"
+#include "timing.hpp"
 #include "utils.hpp"
 
 using Eigen::MatrixXd;
@@ -20,11 +21,12 @@ using Eigen::VectorXd;
 
 TransientAnalysis::TransientAnalysis(const Circuit& ckt_,
                                      const SimulationConfig& sim_,
-                                     const std::string& outFile_)
-    : ckt(ckt_), sim(sim_), outFile(outFile_) {}
+                                     const std::string& outFile_,
+                                     TimingRegistry* timings_)
+    : ckt(ckt_), sim(sim_), outFile(outFile_), timings(timings_) {}
 
 VectorXd TransientAnalysis::computeDcOperatingPoint() const {
-    DcAnalysis dc(ckt, sim, DcSolverKind::GaussSeidel); // 或LU
+    DcAnalysis dc(ckt, sim, DcSolverKind::GaussSeidel, timings); // 或LU
     return dc.run();
 }
 
@@ -120,46 +122,36 @@ void TransientAnalysis::runBackwardEuler() {
         return;
     }
 
-    // ===== 1. 收集 C / L / MOS 元件，并建立初始状态 =====
-    std::vector<std::shared_ptr<CapacitorElement>> caps;
-    std::vector<std::shared_ptr<Inductor>>        inds;
-    std::vector<std::shared_ptr<MosfetBase>>      mosfets;
-
-    for (const auto& e : ckt.elements) {
-        if (auto c = std::dynamic_pointer_cast<CapacitorElement>(e)) {
-            caps.push_back(c);
-        } else if (auto L = std::dynamic_pointer_cast<Inductor>(e)) {
-            inds.push_back(L);
-        } else if (auto m = std::dynamic_pointer_cast<MosfetBase>(e)) {
-            mosfets.push_back(m);
-        }
-    }
+    const auto& cache = ckt.elementCache();
+    const auto& caps = cache.capacitors;
+    const auto& inds = cache.inductors;
+    const auto& mosfets = cache.mos;
 
     // 显式电容：v^{0} = V(n1) - V(n2)
     std::unordered_map<const CapacitorElement*, double> capVprev;
-    for (auto& c : caps) {
+    for (const auto* c : caps) {
         const auto& nodes = c->getNodeIds();
         int n1 = nodes[0];
         int n2 = nodes[1];
         double v1 = getNodeVoltage(ckt, xdc, n1);
         double v2 = getNodeVoltage(ckt, xdc, n2);
-        capVprev[c.get()] = v1 - v2;
+        capVprev[c] = v1 - v2;
     }
 
     // 电感：i_L^{0} = DC 解中的支路电流
     std::unordered_map<const Inductor*, double> indIprev;
-    for (auto& L : inds) {
+    for (const auto* L : inds) {
         int k = L->getBranchEqIndex();
         double i0 = 0.0;
         if (k >= 0 && k < xdc.size()) {
             i0 = xdc(k);
         }
-        indIprev[L.get()] = i0;
+        indIprev[L] = i0;
     }
 
     // MOS 寄生电容状态：从 DC 工作点初始化
     std::unordered_map<const MosfetBase*, MosCapState> mosPrev;
-    for (auto& m : mosfets) {
+    for (const auto* m : mosfets) {
         const auto& nodes = m->getNodeIds();
         int nD = nodes[0];
         int nG = nodes[1];
@@ -176,7 +168,7 @@ void TransientAnalysis::runBackwardEuler() {
         st.vgdPrev = vG - vD;
         st.vsbPrev = vS - vB;
         st.vdbPrev = vD - vB;
-        mosPrev[m.get()] = st;
+        mosPrev[m] = st;
     }
 
     // ===== 2. 打开输出文件，写表头 =====
@@ -188,6 +180,20 @@ void TransientAnalysis::runBackwardEuler() {
 
     ofs << std::scientific << std::setprecision(9);
 
+    struct BranchElemRef {
+        const VoltageSource* vs = nullptr;
+        const Inductor* ind = nullptr;
+    };
+    std::vector<BranchElemRef> branchElems;
+    branchElems.reserve(cache.voltageSources.size() + cache.inductors.size());
+    for (const auto& e : ckt.elements) {
+        if (auto vs = std::dynamic_pointer_cast<VoltageSource>(e)) {
+            branchElems.push_back(BranchElemRef{vs.get(), nullptr});
+        } else if (auto L = std::dynamic_pointer_cast<Inductor>(e)) {
+            branchElems.push_back(BranchElemRef{nullptr, L.get()});
+        }
+    }
+
     ofs << "time";
     // 节点电压
     for (const auto& node : ckt.nodes) {
@@ -196,11 +202,11 @@ void TransientAnalysis::runBackwardEuler() {
         }
     }
     // 电压源与电感电流
-    for (const auto& e : ckt.elements) {
-        if (auto vs = std::dynamic_pointer_cast<VoltageSource>(e)) {
-            ofs << ",I(" << vs->getName() << ")";
-        } else if (auto L = std::dynamic_pointer_cast<Inductor>(e)) {
-            ofs << ",I(" << L->getName() << ")";
+    for (const auto& b : branchElems) {
+        if (b.vs) {
+            ofs << ",I(" << b.vs->getName() << ")";
+        } else if (b.ind) {
+            ofs << ",I(" << b.ind->getName() << ")";
         }
     }
     ofs << "\n";
@@ -216,16 +222,15 @@ void TransientAnalysis::runBackwardEuler() {
             }
         }
         // 电压源与电感电流
-        for (const auto& e : ckt.elements) {
-            if (auto vs = std::dynamic_pointer_cast<VoltageSource>(e)) {
-                int k = vs->getBranchEqIndex();
-                double Ibr = (k >= 0 && k < x.size()) ? x(k) : 0.0;
-                ofs << "," << Ibr;
-            } else if (auto L = std::dynamic_pointer_cast<Inductor>(e)) {
-                int k = L->getBranchEqIndex();
-                double Ibr = (k >= 0 && k < x.size()) ? x(k) : 0.0;
-                ofs << "," << Ibr;
+        for (const auto& b : branchElems) {
+            int k = -1;
+            if (b.vs) {
+                k = b.vs->getBranchEqIndex();
+            } else if (b.ind) {
+                k = b.ind->getBranchEqIndex();
             }
+            double Ibr = (k >= 0 && k < x.size()) ? x(k) : 0.0;
+            ofs << "," << Ibr;
         }
         ofs << "\n";
     };
@@ -266,32 +271,29 @@ void TransientAnalysis::runBackwardEuler() {
             ctx.omega       = 0.0;
 
             // 1) 先 stamp 所有“非 C / 非 L / 非 MOS”的部分
-            for (const auto& e : ckt.elements) {
-                if (std::dynamic_pointer_cast<CapacitorElement>(e)) continue;
-                if (std::dynamic_pointer_cast<Inductor>(e))        continue;
-                if (std::dynamic_pointer_cast<MosfetBase>(e))      continue;
-                e->stamp(G, I, ckt, x, ctx);
-            }
+            for (const auto* r : cache.resistors) r->stamp(G, I, ckt, x, ctx);
+            for (const auto* vs : cache.voltageSources) vs->stamp(G, I, ckt, x, ctx);
+            for (const auto* is : cache.currentSources) is->stamp(G, I, ckt, x, ctx);
 
             // 2) 线性 MOS 导电部分（Ids、gm、gds 等）
-            for (const auto& m : mosfets) {
+            for (const auto* m : mosfets) {
                 m->stamp(G, I, ckt, x, ctx);
             }
 
             // 3) 显式电容的后向欧拉伴随模型
-            for (const auto& c : caps) {
+            for (const auto* c : caps) {
                 double Cval = c->getC();
                 const auto& nodes = c->getNodeIds();
                 int n1 = nodes[0];
                 int n2 = nodes[1];
                 int eq1 = ckt.nodes[n1].eqIndex;
                 int eq2 = ckt.nodes[n2].eqIndex;
-                double vPrev = capVprev[c.get()]; // V(n1) - V(n2) at previous step
+                double vPrev = capVprev[c]; // V(n1) - V(n2) at previous step
                 stampCapBE(eq1, eq2, Cval, dt, vPrev, G, I);
             }
 
             // 4) 电感的后向欧拉 Thévenin 伴随模型
-            for (const auto& L : inds) {
+            for (const auto* L : inds) {
                 double Lval = L->getL();
                 if (Lval <= 0.0) continue;
 
@@ -304,7 +306,7 @@ void TransientAnalysis::runBackwardEuler() {
                 if (k < 0 || k >= N) continue;
 
                 double R_eq  = Lval / dt;
-                double iPrev = indIprev[L.get()];
+                double iPrev = indIprev[L];
                 double V_hist = -R_eq * iPrev;
 
                 // KCL：节点电流 = I_L
@@ -319,7 +321,7 @@ void TransientAnalysis::runBackwardEuler() {
             }
 
             // 5) MOS 寄生电容：Cgs, Cgd, Cs, Cd
-            for (const auto& m : mosfets) {
+            for (const auto* m : mosfets) {
                 const auto& nodes = m->getNodeIds();
                 int nD = nodes[0];
                 int nG = nodes[1];
@@ -338,7 +340,7 @@ void TransientAnalysis::runBackwardEuler() {
                 double CsJ = Cj0;
                 double CdJ = Cj0;
 
-                const MosCapState& stPrev = mosPrev[m.get()];
+                const MosCapState& stPrev = mosPrev[m];
 
                 if (Cgs > 0.0) stampCapBE(eqG, eqS, Cgs, dt, stPrev.vgsPrev, G, I);
                 if (Cgd > 0.0) stampCapBE(eqG, eqD, Cgd, dt, stPrev.vgdPrev, G, I);
@@ -373,25 +375,25 @@ void TransientAnalysis::runBackwardEuler() {
 
         // ===== 4. 步进成功：更新所有状态，并输出 =====
         // 显式电容
-        for (const auto& c : caps) {
+        for (const auto* c : caps) {
             const auto& nodes = c->getNodeIds();
             int n1 = nodes[0];
             int n2 = nodes[1];
             double v1 = getNodeVoltage(ckt, x, n1);
             double v2 = getNodeVoltage(ckt, x, n2);
-            capVprev[c.get()] = v1 - v2;
+            capVprev[c] = v1 - v2;
         }
         // 电感
-        for (const auto& L : inds) {
+        for (const auto* L : inds) {
             int k = L->getBranchEqIndex();
             double iL = 0.0;
             if (k >= 0 && k < x.size()) {
                 iL = x(k);
             }
-            indIprev[L.get()] = iL;
+            indIprev[L] = iL;
         }
         // MOS 寄生电容状态
-        for (const auto& m : mosfets) {
+        for (const auto* m : mosfets) {
             const auto& nodes = m->getNodeIds();
             int nD = nodes[0];
             int nG = nodes[1];
@@ -408,7 +410,7 @@ void TransientAnalysis::runBackwardEuler() {
             st.vgdPrev = vG - vD;
             st.vsbPrev = vS - vB;
             st.vdbPrev = vD - vB;
-            mosPrev[m.get()] = st;
+            mosPrev[m] = st;
         }
 
         dumpRow(tNow, x);
@@ -455,20 +457,10 @@ void TransientAnalysis::runTrapezoidal(){
         return;
     }
 
-    // ===== 1. 收集 C / L / MOS，并建立 TR 状态 =====
-    std::vector<std::shared_ptr<CapacitorElement>> caps;
-    std::vector<std::shared_ptr<Inductor>>        inds;
-    std::vector<std::shared_ptr<MosfetBase>>      mosfets;
-
-    for (const auto& e : ckt.elements) {
-        if (auto c = std::dynamic_pointer_cast<CapacitorElement>(e)) {
-            caps.push_back(c);
-        } else if (auto L = std::dynamic_pointer_cast<Inductor>(e)) {
-            inds.push_back(L);
-        } else if (auto m = std::dynamic_pointer_cast<MosfetBase>(e)) {
-            mosfets.push_back(m);
-        }
-    }
+    const auto& cache = ckt.elementCache();
+    const auto& caps = cache.capacitors;
+    const auto& inds = cache.inductors;
+    const auto& mosfets = cache.mos;
 
     // 电容：上一时刻电压/电流（TR 需要记 i^n）
     struct CapTrapState {
@@ -476,7 +468,7 @@ void TransientAnalysis::runTrapezoidal(){
         double iPrev = 0.0;  // i 从 n1->n2, at t^n
     };
     std::unordered_map<const CapacitorElement*, CapTrapState> capState;
-    for (auto& c : caps) {
+    for (const auto* c : caps) {
         const auto& nodes = c->getNodeIds();
         int n1 = nodes[0];
         int n2 = nodes[1];
@@ -485,7 +477,7 @@ void TransientAnalysis::runTrapezoidal(){
         CapTrapState st;
         st.vPrev = v1 - v2;
         st.iPrev = 0.0;  // DC 下 dv/dt = 0，i 取 0
-        capState[c.get()] = st;
+        capState[c] = st;
     }
 
     // 电感：上一时刻电压/电流
@@ -494,7 +486,7 @@ void TransientAnalysis::runTrapezoidal(){
         double iPrev = 0.0;  // I_L at t^n
     };
     std::unordered_map<const Inductor*, IndTrapState> indState;
-    for (auto& L : inds) {
+    for (const auto* L : inds) {
         int k = L->getBranchEqIndex();
         if (k < 0 || k >= N) continue;
         const auto& nodes = L->getNodeIds();
@@ -505,7 +497,7 @@ void TransientAnalysis::runTrapezoidal(){
         IndTrapState st;
         st.vPrev = vP - vM;
         st.iPrev = xdc(k);   // DC 下的电感电流
-        indState[L.get()] = st;
+        indState[L] = st;
     }
 
     // MOS 寄生电容：4 个电压/电流
@@ -516,7 +508,7 @@ void TransientAnalysis::runTrapezoidal(){
         double vdbPrev = 0.0, idbPrev = 0.0;
     };
     std::unordered_map<const MosfetBase*, MosCapTrapState> mosPrev;
-    for (auto& m : mosfets) {
+    for (const auto* m : mosfets) {
         const auto& nodes = m->getNodeIds();
         int nD = nodes[0];
         int nG = nodes[1];
@@ -535,7 +527,7 @@ void TransientAnalysis::runTrapezoidal(){
         st.vdbPrev = vD - vB;
         // DC 下假定 C 电流为 0
         st.igsPrev = st.igdPrev = st.isbPrev = st.idbPrev = 0.0;
-        mosPrev[m.get()] = st;
+        mosPrev[m] = st;
     }
 
     // ===== 2. 打开输出文件，写表头 =====
@@ -546,17 +538,31 @@ void TransientAnalysis::runTrapezoidal(){
     }
     ofs << std::scientific << std::setprecision(9);
 
+    struct BranchElemRef {
+        const VoltageSource* vs = nullptr;
+        const Inductor* ind = nullptr;
+    };
+    std::vector<BranchElemRef> branchElems;
+    branchElems.reserve(cache.voltageSources.size() + cache.inductors.size());
+    for (const auto& e : ckt.elements) {
+        if (auto vs = std::dynamic_pointer_cast<VoltageSource>(e)) {
+            branchElems.push_back(BranchElemRef{vs.get(), nullptr});
+        } else if (auto L = std::dynamic_pointer_cast<Inductor>(e)) {
+            branchElems.push_back(BranchElemRef{nullptr, L.get()});
+        }
+    }
+
     ofs << "time";
     for (const auto& node : ckt.nodes) {
         if (node.eqIndex >= 0) {
             ofs << ",V(" << node.name << ")";
         }
     }
-    for (const auto& e : ckt.elements) {
-        if (auto vs = std::dynamic_pointer_cast<VoltageSource>(e)) {
-            ofs << ",I(" << vs->getName() << ")";
-        } else if (auto L = std::dynamic_pointer_cast<Inductor>(e)) {
-            ofs << ",I(" << L->getName() << ")";
+    for (const auto& b : branchElems) {
+        if (b.vs) {
+            ofs << ",I(" << b.vs->getName() << ")";
+        } else if (b.ind) {
+            ofs << ",I(" << b.ind->getName() << ")";
         }
     }
     ofs << "\n";
@@ -570,16 +576,15 @@ void TransientAnalysis::runTrapezoidal(){
                 ofs << "," << x(node.eqIndex);
             }
         }
-        for (const auto& e : ckt.elements) {
-            if (auto vs = std::dynamic_pointer_cast<VoltageSource>(e)) {
-                int k = vs->getBranchEqIndex();
-                double Ibr = (k >= 0 && k < x.size()) ? x(k) : 0.0;
-                ofs << "," << Ibr;
-            } else if (auto L = std::dynamic_pointer_cast<Inductor>(e)) {
-                int k = L->getBranchEqIndex();
-                double Ibr = (k >= 0 && k < x.size()) ? x(k) : 0.0;
-                ofs << "," << Ibr;
+        for (const auto& b : branchElems) {
+            int k = -1;
+            if (b.vs) {
+                k = b.vs->getBranchEqIndex();
+            } else if (b.ind) {
+                k = b.ind->getBranchEqIndex();
             }
+            double Ibr = (k >= 0 && k < x.size()) ? x(k) : 0.0;
+            ofs << "," << Ibr;
         }
         ofs << "\n";
     };
@@ -600,6 +605,9 @@ void TransientAnalysis::runTrapezoidal(){
     ConvController ctrl;           // 复用 DC 里的收敛控制器
     const double tol          = 1e-6;
     const int    maxNewtonIters = 60;
+    MatrixXd G(N, N);
+    VectorXd I(N);
+    VectorXd xRaw(N);
 
     for (int step = 0; step < totalSteps; ++step) {
         double tNow = (step + 1) * dt;
@@ -618,8 +626,8 @@ void TransientAnalysis::runTrapezoidal(){
         double prevErr = std::numeric_limits<double>::infinity();
 
         for (int iter = 0; iter < maxNewtonIters; ++iter) {
-            MatrixXd G = MatrixXd::Zero(N, N);
-            VectorXd I = VectorXd::Zero(N);
+            G.setZero();
+            I.setZero();
 
             AnalysisContext ctx;
             ctx.type        = AnalysisType::TRAN;
@@ -628,20 +636,17 @@ void TransientAnalysis::runTrapezoidal(){
             ctx.omega       = 0.0;
 
             // 1) 非 C / 非 L / 非 MOS 元件（含电压源、独立源等）
-            for (const auto& e : ckt.elements) {
-                if (std::dynamic_pointer_cast<CapacitorElement>(e)) continue;
-                if (std::dynamic_pointer_cast<Inductor>(e))        continue;
-                if (std::dynamic_pointer_cast<MosfetBase>(e))      continue;
-                e->stamp(G, I, ckt, x, ctx);
-            }
+            for (const auto* r : cache.resistors) r->stamp(G, I, ckt, x, ctx);
+            for (const auto* vs : cache.voltageSources) vs->stamp(G, I, ckt, x, ctx);
+            for (const auto* is : cache.currentSources) is->stamp(G, I, ckt, x, ctx);
 
             // 2) MOS 导电部分
-            for (const auto& m : mosfets) {
+            for (const auto* m : mosfets) {
                 m->stamp(G, I, ckt, x, ctx);
             }
 
             // 3) 显式电容 TR 伴随（Norton 等效）
-            for (const auto& c : caps) {
+            for (const auto* c : caps) {
                 double Cval = c->getC();
                 if (Cval <= 0.0) continue;
 
@@ -651,12 +656,12 @@ void TransientAnalysis::runTrapezoidal(){
                 int eq1 = ckt.nodes[n1].eqIndex;
                 int eq2 = ckt.nodes[n2].eqIndex;
 
-                const CapTrapState& st = capState[c.get()];
+                const CapTrapState& st = capState[c];
                 stampCapTR(eq1, eq2, Cval, dt, st.vPrev, st.iPrev, G, I);
             }
 
             // 4) 电感 TR 伴随（Thevenin 等效）
-            for (const auto& L : inds) {
+            for (const auto* L : inds) {
                 double Lval = L->getL();
                 if (Lval <= 0.0) continue;
 
@@ -668,7 +673,7 @@ void TransientAnalysis::runTrapezoidal(){
                 int k   = L->getBranchEqIndex();
                 if (k < 0 || k >= N) continue;
 
-                const IndTrapState& st = indState[L.get()];
+                const IndTrapState& st = indState[L];
                 double vPrev = st.vPrev;  // V^n
                 double iPrev = st.iPrev;  // i^n
 
@@ -688,7 +693,7 @@ void TransientAnalysis::runTrapezoidal(){
             }
 
             // 5) MOS 寄生电容 TR
-            for (const auto& m : mosfets) {
+            for (const auto* m : mosfets) {
                 const auto& nodes = m->getNodeIds();
                 int nD = nodes[0];
                 int nG = nodes[1];
@@ -707,7 +712,7 @@ void TransientAnalysis::runTrapezoidal(){
                 double CsJ = Cj0;
                 double CdJ = Cj0;
 
-                const MosCapTrapState& st = mosPrev[m.get()];
+                const MosCapTrapState& st = mosPrev[m];
 
                 // Gate-source
                 stampCapTR(eqG, eqS, Cgs, dt, st.vgsPrev, st.igsPrev, G, I);
@@ -723,7 +728,7 @@ void TransientAnalysis::runTrapezoidal(){
             stampGlobalGmin(ckt, G, gmin);
 
             // 7) 解线性方程，使用 LU
-            VectorXd xRaw = Solver::solveLinearSystemLU(G, I);
+            xRaw = Solver::solveLinearSystemLU(G, I);
             if (!xRaw.allFinite()) {
                 // 如果有 NaN/Inf，适当增大 gmin 再试一轮
                 gmin = std::min(gmin * 10.0, 1e-4);
@@ -756,8 +761,8 @@ void TransientAnalysis::runTrapezoidal(){
 
         // ===== 4. 时间步收敛后：更新所有 TR 状态 & 输出 =====
         // 显式电容：i^{n+1} = (2C/dt)*(v^{n+1}-v^n) - i^n
-        for (auto& c : caps) {
-            CapTrapState& st = capState[c.get()];
+        for (const auto* c : caps) {
+            CapTrapState& st = capState[c];
             const auto& nodes = c->getNodeIds();
             int n1 = nodes[0];
             int n2 = nodes[1];
@@ -771,8 +776,8 @@ void TransientAnalysis::runTrapezoidal(){
         }
 
         // 电感：i^{n+1} = i^n + (dt/(2L))*(v^{n+1}+v^n)
-        for (auto& L : inds) {
-            IndTrapState& st = indState[L.get()];
+        for (const auto* L : inds) {
+            IndTrapState& st = indState[L];
             const auto& nodes = L->getNodeIds();
             int np = nodes[0];
             int nm = nodes[1];
@@ -786,8 +791,8 @@ void TransientAnalysis::runTrapezoidal(){
         }
 
         // MOS 寄生电容电压/电流
-        for (auto& m : mosfets) {
-            MosCapTrapState& st = mosPrev[m.get()];
+        for (const auto* m : mosfets) {
+            MosCapTrapState& st = mosPrev[m];
             const auto& nodes = m->getNodeIds();
             int nD = nodes[0];
             int nG = nodes[1];
@@ -866,46 +871,36 @@ VectorXd TransientAnalysis::integrateOnePeriodBE(
         throw std::runtime_error("Transient(BE-Period): T/dt too small, no steps.");
     }
 
-    // ===== 1. 收集 C / L / MOS 元件，并用 x0 建立初始状态 =====
-    std::vector<std::shared_ptr<CapacitorElement>> caps;
-    std::vector<std::shared_ptr<Inductor>>        inds;
-    std::vector<std::shared_ptr<MosfetBase>>      mosfets;
-
-    for (const auto& e : ckt.elements) {
-        if (auto c = std::dynamic_pointer_cast<CapacitorElement>(e)) {
-            caps.push_back(c);
-        } else if (auto L = std::dynamic_pointer_cast<Inductor>(e)) {
-            inds.push_back(L);
-        } else if (auto m = std::dynamic_pointer_cast<MosfetBase>(e)) {
-            mosfets.push_back(m);
-        }
-    }
+    const auto& cache = ckt.elementCache();
+    const auto& caps = cache.capacitors;
+    const auto& inds = cache.inductors;
+    const auto& mosfets = cache.mos;
 
     // 显式电容：v^0 = V(n1)-V(n2)，从 x0 初始化
     std::unordered_map<const CapacitorElement*, double> capVprev;
-    for (auto& c : caps) {
+    for (const auto* c : caps) {
         const auto& nodes = c->getNodeIds();
         int n1 = nodes[0];
         int n2 = nodes[1];
         double v1 = getNodeVoltage(ckt, x0, n1);
         double v2 = getNodeVoltage(ckt, x0, n2);
-        capVprev[c.get()] = v1 - v2;
+        capVprev[c] = v1 - v2;
     }
 
     // 电感：i_L^0 = x0 里的支路电流
     std::unordered_map<const Inductor*, double> indIprev;
-    for (auto& L : inds) {
+    for (const auto* L : inds) {
         int k = L->getBranchEqIndex();
         double i0 = 0.0;
         if (k >= 0 && k < x0.size()) {
             i0 = x0(k);
         }
-        indIprev[L.get()] = i0;
+        indIprev[L] = i0;
     }
 
     // MOS 寄生电容状态：从 x0 初始化
     std::unordered_map<const MosfetBase*, MosCapState> mosPrev;
-    for (auto& m : mosfets) {
+    for (const auto* m : mosfets) {
         const auto& nodes = m->getNodeIds();
         int nD = nodes[0];
         int nG = nodes[1];
@@ -922,7 +917,7 @@ VectorXd TransientAnalysis::integrateOnePeriodBE(
         st.vgdPrev = vG - vD;
         st.vsbPrev = vS - vB;
         st.vdbPrev = vD - vB;
-        mosPrev[m.get()] = st;
+        mosPrev[m] = st;
     }
 
     // ===== 2. 主时间步循环（完全照 runBackwardEuler，只是初值换成 x0，不写文件） =====
@@ -955,32 +950,29 @@ VectorXd TransientAnalysis::integrateOnePeriodBE(
             ctx.omega       = 0.0;
 
             // 1) 非 C / 非 L / 非 MOS 元件
-            for (const auto& e : ckt.elements) {
-                if (std::dynamic_pointer_cast<CapacitorElement>(e)) continue;
-                if (std::dynamic_pointer_cast<Inductor>(e))        continue;
-                if (std::dynamic_pointer_cast<MosfetBase>(e))      continue;
-                e->stamp(G, I, ckt, x, ctx);
-            }
+            for (const auto* r : cache.resistors) r->stamp(G, I, ckt, x, ctx);
+            for (const auto* vs : cache.voltageSources) vs->stamp(G, I, ckt, x, ctx);
+            for (const auto* is : cache.currentSources) is->stamp(G, I, ckt, x, ctx);
 
             // 2) MOS 导电部分
-            for (const auto& m : mosfets) {
+            for (const auto* m : mosfets) {
                 m->stamp(G, I, ckt, x, ctx);
             }
 
             // 3) 显式电容（后向欧拉）
-            for (const auto& c : caps) {
+            for (const auto* c : caps) {
                 double Cval = c->getC();
                 const auto& nodes = c->getNodeIds();
                 int n1 = nodes[0];
                 int n2 = nodes[1];
                 int eq1 = ckt.nodes[n1].eqIndex;
                 int eq2 = ckt.nodes[n2].eqIndex;
-                double vPrev = capVprev[c.get()];
+                double vPrev = capVprev[c];
                 stampCapBE(eq1, eq2, Cval, dt, vPrev, G, I);
             }
 
             // 4) 电感（后向欧拉 Thévenin）
-            for (const auto& L : inds) {
+            for (const auto* L : inds) {
                 double Lval = L->getL();
                 if (Lval <= 0.0) continue;
 
@@ -993,7 +985,7 @@ VectorXd TransientAnalysis::integrateOnePeriodBE(
                 if (k < 0 || k >= N) continue;
 
                 double R_eq  = Lval / dt;
-                double iPrev = indIprev[L.get()];
+                double iPrev = indIprev[L];
                 double V_hist = -R_eq * iPrev;
 
                 if (eqP >= 0) G(eqP, k) += 1.0;
@@ -1006,7 +998,7 @@ VectorXd TransientAnalysis::integrateOnePeriodBE(
             }
 
             // 5) MOS 寄生电容（用 Cj0 粗略近似）
-            for (const auto& m : mosfets) {
+            for (const auto* m : mosfets) {
                 const auto& nodes = m->getNodeIds();
                 int nD = nodes[0];
                 int nG = nodes[1];
@@ -1025,7 +1017,7 @@ VectorXd TransientAnalysis::integrateOnePeriodBE(
                 double CsJ = Cj0;
                 double CdJ = Cj0;
 
-                const MosCapState& stPrev = mosPrev[m.get()];
+                const MosCapState& stPrev = mosPrev[m];
 
                 stampCapBE(eqG, eqS, Cgs, dt, stPrev.vgsPrev, G, I);
                 stampCapBE(eqG, eqD, Cgd, dt, stPrev.vgdPrev, G, I);
@@ -1057,23 +1049,23 @@ VectorXd TransientAnalysis::integrateOnePeriodBE(
         }
 
         // ===== 3. 步进成功：更新电容 / 电感 / MOS 状态 =====
-        for (const auto& c : caps) {
+        for (const auto* c : caps) {
             const auto& nodes = c->getNodeIds();
             int n1 = nodes[0];
             int n2 = nodes[1];
             double v1 = getNodeVoltage(ckt, x, n1);
             double v2 = getNodeVoltage(ckt, x, n2);
-            capVprev[c.get()] = v1 - v2;
+            capVprev[c] = v1 - v2;
         }
-        for (const auto& L : inds) {
+        for (const auto* L : inds) {
             int k = L->getBranchEqIndex();
             double iL = 0.0;
             if (k >= 0 && k < x.size()) {
                 iL = x(k);
             }
-            indIprev[L.get()] = iL;
+            indIprev[L] = iL;
         }
-        for (const auto& m : mosfets) {
+        for (const auto* m : mosfets) {
             const auto& nodes = m->getNodeIds();
             int nD = nodes[0];
             int nG = nodes[1];
@@ -1090,7 +1082,7 @@ VectorXd TransientAnalysis::integrateOnePeriodBE(
             st.vgdPrev = vG - vD;
             st.vsbPrev = vS - vB;
             st.vdbPrev = vD - vB;
-            mosPrev[m.get()] = st;
+            mosPrev[m] = st;
         }
 
         if (dumpRow) {

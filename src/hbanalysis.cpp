@@ -1,16 +1,63 @@
 #define _USE_MATH_DEFINES
 #include "analysis.hpp"
+#include "runtime.hpp"
+#include "timing.hpp"
 #include <unsupported/Eigen/FFT>
 #include <iostream>
 #include <iomanip>
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <fstream>
+#include <thread>
+
+struct HbJacobianScratch {
+    Eigen::VectorXd deltaCol;
+    std::vector<std::complex<double>> fftFreq;
+    std::vector<std::complex<double>> fftTime;
+    Eigen::FFT<double> fft;
+};
+
+struct HbAnalysis::HbWorkspace {
+    std::vector<HbAnalysis::CVector> Vk;
+    std::vector<HbAnalysis::CVector> linearJk;
+    std::vector<HbAnalysis::CMatrix> linearYk;
+    std::vector<HbAnalysis::CVector> Ilin_k;
+    std::vector<HbAnalysis::CVector> Inl_k;
+    std::vector<Eigen::VectorXd> v_t;
+    std::vector<Eigen::VectorXd> Inl_t;
+    std::vector<Eigen::MatrixXd> Gnl_t;
+    Eigen::VectorXd F;
+    Eigen::VectorXd Ftry;
+    Eigen::VectorXd rhs;
+    Eigen::VectorXd dx;
+    Eigen::MatrixXd J;
+    std::vector<int> qH;
+    std::vector<int> qNode;
+    std::vector<unsigned char> qIsReal;
+    std::vector<unsigned char> qActive;
+    std::vector<int> qActiveList;
+    std::vector<int> qNodeActive;
+    std::vector<const double*> qDvActive;
+    std::vector<double*> qColPtr;
+    std::vector<const double*> qDvPtr;
+    std::vector<int> rowBaseByH;
+    std::vector<int> rowBaseImByH;
+    Eigen::VectorXd deltaCol;
+    std::vector<HbJacobianScratch> jacScratch;
+    std::vector<std::complex<double>> fftFreq;
+    std::vector<std::complex<double>> fftTime;
+    Eigen::FFT<double> fft;
+    std::vector<int> luPerm;
+};
+
+HbAnalysis::~HbAnalysis() = default;
 
 HbAnalysis::HbAnalysis(const Circuit&          ckt_,
                        const SimulationConfig& sim_,
-                       const Eigen::VectorXd&  dcOp_)
-    : ckt(ckt_), sim(sim_), xdc(dcOp_) {
+                       const Eigen::VectorXd&  dcOp_,
+                       TimingRegistry* timings_)
+    : ckt(ckt_), sim(sim_), xdc(dcOp_), timings(timings_) {
 
     N = ckt.numUnknowns();
     if (!sim.hb.enabled) {
@@ -58,6 +105,80 @@ HbAnalysis::HbAnalysis(const Circuit&          ckt_,
             }
         }
     }
+    initWorkspace();
+}
+
+void HbAnalysis::initWorkspace() {
+    workspace = std::make_unique<HbWorkspace>();
+    auto& w = *workspace;
+    int H = K + 1;
+    int nVars = numRealVars();
+
+    w.Vk.assign(H, CVector::Zero(N));
+    w.linearJk.assign(H, CVector::Zero(N));
+    w.linearYk.assign(H, CMatrix::Zero(N, N));
+    w.Ilin_k.assign(H, CVector::Zero(N));
+    w.Inl_k.assign(H, CVector::Zero(N));
+    w.v_t.assign(nTimeSamples, Eigen::VectorXd::Zero(N));
+    w.Inl_t.assign(nTimeSamples, Eigen::VectorXd::Zero(N));
+    w.Gnl_t.assign(nTimeSamples, Eigen::MatrixXd::Zero(N, N));
+    w.F = Eigen::VectorXd::Zero(nVars);
+    w.Ftry = Eigen::VectorXd::Zero(nVars);
+    w.rhs = Eigen::VectorXd::Zero(nVars);
+    w.dx = Eigen::VectorXd::Zero(nVars);
+    w.J = Eigen::MatrixXd::Zero(nVars, nVars);
+    w.qH.assign(nVars, 0);
+    w.qNode.assign(nVars, 0);
+    w.qIsReal.assign(nVars, 0);
+    w.qActive.assign(nVars, 1);
+    w.qActiveList.clear();
+    w.qNodeActive.clear();
+    w.qDvActive.clear();
+    w.qColPtr.clear();
+    w.qDvPtr.assign(nVars, nullptr);
+    w.rowBaseByH.assign(H, 0);
+    w.rowBaseImByH.assign(H, 0);
+    w.deltaCol = Eigen::VectorXd::Zero(nVars);
+    w.jacScratch.clear();
+    w.fftFreq.assign(nTimeSamples, std::complex<double>(0.0, 0.0));
+    w.fftTime.assign(nTimeSamples, std::complex<double>(0.0, 0.0));
+    w.luPerm.clear();
+    linearCacheScale = std::numeric_limits<double>::quiet_NaN();
+
+    for (int h = 0; h < H; ++h) {
+        w.rowBaseByH[h] = h * 2 * N;
+        w.rowBaseImByH[h] = w.rowBaseByH[h] + N;
+    }
+    if (N > 0) {
+        const int block = 2 * N;
+        for (int q = 0; q < nVars; ++q) {
+            int h = q / block;
+            int offset = q - h * block;
+            bool isReal = (offset < N);
+            int node = isReal ? offset : (offset - N);
+            w.qH[q] = h;
+            w.qNode[q] = node;
+            w.qIsReal[q] = static_cast<unsigned char>(isReal ? 1 : 0);
+            w.qActive[q] = static_cast<unsigned char>((h == 0 && !isReal) ? 0 : 1);
+            if (w.qActive[q]) {
+                if (isReal) {
+                    w.qDvPtr[q] = dvRealTable[h].data();
+                } else {
+                    w.qDvPtr[q] = dvImagTable[h].data();
+                }
+                w.qActiveList.push_back(q);
+                w.qNodeActive.push_back(node);
+                w.qDvActive.push_back(w.qDvPtr[q]);
+            }
+        }
+    }
+}
+
+HbAnalysis::HbWorkspace& HbAnalysis::ws() const {
+    if (!workspace) {
+        throw std::runtime_error("HB workspace not initialized");
+    }
+    return *workspace;
 }
 
 HbAnalysis::HbVarIndex HbAnalysis::decodeVarIndex(int p) const {
@@ -83,7 +204,17 @@ void HbAnalysis::unpackRealToHarmonics(
     std::vector<CVector>& Vk
 ) const {
     int H = K + 1;
-    Vk.assign(H, CVector::Zero(N));
+    if (static_cast<int>(Vk.size()) != H) {
+        Vk.assign(H, CVector::Zero(N));
+    } else {
+        for (auto& v : Vk) {
+            if (v.size() != N) {
+                v = CVector::Zero(N);
+            } else {
+                v.setZero();
+            }
+        }
+    }
 
     for(int h = 0; h < H; ++h) {
         int base = h * 2 * N;
@@ -102,32 +233,45 @@ void HbAnalysis::harmonicsToTimeDomain(
     const std::vector<CVector>& Vk,
     std::vector<Eigen::VectorXd>& v_t
 ) const {
+    HbWorkspace& w = ws();
     int H = K + 1;
 
-    v_t.assign(nTimeSamples, Eigen::VectorXd::Zero(N));
+    if (static_cast<int>(v_t.size()) != nTimeSamples) {
+        v_t.assign(nTimeSamples, Eigen::VectorXd::Zero(N));
+    }
+    for (auto& vt : v_t) {
+        if (vt.size() != N) {
+            vt = Eigen::VectorXd::Zero(N);
+        } else {
+            vt.setZero();
+        }
+    }
 
-    Eigen::FFT<double> fft;
-    std::vector<std::complex<double>> freq(nTimeSamples);
-    std::vector<std::complex<double>> time;
+    if (static_cast<int>(w.fftFreq.size()) != nTimeSamples) {
+        w.fftFreq.assign(nTimeSamples, std::complex<double>(0.0, 0.0));
+    }
+    if (static_cast<int>(w.fftTime.size()) != nTimeSamples) {
+        w.fftTime.assign(nTimeSamples, std::complex<double>(0.0, 0.0));
+    }
 
     const double Nfft = static_cast<double>(nTimeSamples);
 
     for (int i = 0; i < N; ++i) {
         // 构造「双边谱」：0, 1..K, 其余为 0，负频率用共轭补齐
-        std::fill(freq.begin(), freq.end(), std::complex<double>(0.0, 0.0));
-        freq[0] = Vk[0](i) * Nfft; // DC
+        std::fill(w.fftFreq.begin(), w.fftFreq.end(), std::complex<double>(0.0, 0.0));
+        w.fftFreq[0] = Vk[0](i) * Nfft; // DC
         for (int h = 1; h < H && h < nTimeSamples; ++h) {
-            freq[h] = Vk[h](i) * Nfft;
+            w.fftFreq[h] = Vk[h](i) * Nfft;
             // 负频率位置 N - h，用共轭
             int negIdx = nTimeSamples - h;
             if (negIdx >= 0 && negIdx < nTimeSamples) {
-                freq[negIdx] = std::conj(Vk[h](i)) * Nfft;
+                w.fftFreq[negIdx] = std::conj(Vk[h](i)) * Nfft;
             }
         }
-        fft.inv(time, freq);
+        w.fft.inv(w.fftTime, w.fftFreq);
         
         for (int n = 0; n < nTimeSamples; ++n) {
-            v_t[n](i) = time[n].real();
+            v_t[n](i) = w.fftTime[n].real();
         }
     }
 }
@@ -137,24 +281,38 @@ void HbAnalysis::timeDomainToHarmonics(
     const std::vector<Eigen::VectorXd>& Inl_t, 
     std::vector<CVector>& Inl_k
 ) const {
+    HbWorkspace& w = ws();
     int H = K + 1;
     
-    Inl_k.assign(H, CVector::Zero(N));
-    Eigen::FFT<double> fft;
-    std::vector<std::complex<double>> in(nTimeSamples);
-    std::vector<std::complex<double>> out;
+    if (static_cast<int>(Inl_k.size()) != H) {
+        Inl_k.assign(H, CVector::Zero(N));
+    }
+    for (auto& v : Inl_k) {
+        if (v.size() != N) {
+            v = CVector::Zero(N);
+        } else {
+            v.setZero();
+        }
+    }
+
+    if (static_cast<int>(w.fftTime.size()) != nTimeSamples) {
+        w.fftTime.assign(nTimeSamples, std::complex<double>(0.0, 0.0));
+    }
+    if (static_cast<int>(w.fftFreq.size()) != nTimeSamples) {
+        w.fftFreq.assign(nTimeSamples, std::complex<double>(0.0, 0.0));
+    }
 
     for(int i = 0; i < N; ++i) {
         for(int n = 0; n < nTimeSamples; n++) {
             double val = (i < Inl_t[n].size()) ? Inl_t[n](i) : 0.0;
-            in[n] = std::complex<double>(val, 0.0);
+            w.fftTime[n] = std::complex<double>(val, 0.0);
         }
 
-        fft.fwd(out, in);
+        w.fft.fwd(w.fftFreq, w.fftTime);
 
-        for (int h = 0; h < H && h < static_cast<int>(out.size()); ++h) {
+        for (int h = 0; h < H && h < static_cast<int>(w.fftFreq.size()); ++h) {
             // 统一用 1/N 缩放，使逆/正变换一致
-            Inl_k[h](i) = out[h] / static_cast<double>(nTimeSamples);
+            Inl_k[h](i) = w.fftFreq[h] / static_cast<double>(nTimeSamples);
         }
     }
 }
@@ -174,10 +332,7 @@ void HbAnalysis::evalMosCapChargeAtTime(
         if (eq2 >= 0 && eq2 < N) Qcap_t(eq2) -= C * dv; 
     };
 
-    for(const auto& e : ckt.elements) {
-        auto m = std::dynamic_pointer_cast<MosfetBase>(e);
-        if(!m) continue;
-
+    for (const auto* m : ckt.elementCache().mos) {
         const auto& nodes = m->getNodeIds();
         int nD = nodes[0];
         int nG = nodes[1];
@@ -202,20 +357,41 @@ void HbAnalysis::evalMosCapChargeAtTime(
     }
 }
 
+void HbAnalysis::prepareLinearCache(double sourceScale) const {
+    HbWorkspace& w = ws();
+    int H = K + 1;
+    if (static_cast<int>(w.linearYk.size()) != H) {
+        w.linearYk.assign(H, CMatrix::Zero(N, N));
+    }
+    if (static_cast<int>(w.linearJk.size()) != H) {
+        w.linearJk.assign(H, CVector::Zero(N));
+    }
+    {
+        ScopedTimer timer(timings, "HB.build_linear_Yk");
+        if (!std::isnan(linearCacheScale) && std::abs(linearCacheScale - sourceScale) < 1e-15) {
+            return;
+        }
+        for (int h = 0; h < H; ++h) {
+            double omega_k = h * omega0;
+            buildLinearYJ(h, omega_k, /*gmin=*/0.0, sourceScale, w.linearYk[h], w.linearJk[h]);
+        }
+        linearCacheScale = sourceScale;
+    }
+}
+
 void HbAnalysis::evalNonlinearCurrentsAtTime(
     const Eigen::VectorXd& v_t,
-    Eigen::VectorXd& Inl_t, Eigen::MatrixXd& Gnl_t
+    Eigen::VectorXd& Inl_t, Eigen::MatrixXd* Gnl_t
 ) const {
     Inl_t.setZero(N);
-    Gnl_t.setZero(N, N);
+    if (Gnl_t) {
+        Gnl_t->setZero(N, N);
+    }
     auto addI = [&](int eq, double val) {
         if (eq >= 0 && eq < N) Inl_t(eq) += val;
     };
 
-    for(const auto& e : ckt.elements) {
-        auto m = std::dynamic_pointer_cast<MosfetBase>(e);
-        if(!m) continue;
-
+    for (const auto* m : ckt.elementCache().mos) {
         double Ids = 0.0, gm = 0.0, gds = 0.0;
         m->evalIdsGmGds(ckt, v_t, Ids, gm, gds);
 
@@ -229,7 +405,9 @@ void HbAnalysis::evalNonlinearCurrentsAtTime(
         addI(eqD,  Ids);
         addI(eqS, -Ids);
 
-        m->stampNonlinearConductance(Gnl_t, ckt, v_t);
+        if (Gnl_t) {
+            m->stampNonlinearConductance(*Gnl_t, ckt, v_t);
+        }
     }
 }
 
@@ -260,72 +438,80 @@ void HbAnalysis::computeResidualAndTimeDomainJacobian(
     const Eigen::VectorXd& x,
     double gmin, double sourceScale,
     Eigen::VectorXd& F,
-    std::vector<Eigen::MatrixXd>& Gnl_t_vec
+    bool needGnl
 ) const {
     int H = K + 1;
     if (x.size() != numRealVars()) {
         throw std::runtime_error("HbAnalysis::computeResidual: x size mismatch.");
     }
 
-    //1.x->Vk
-    std::vector<CVector> Vk;
-    unpackRealToHarmonics(x, Vk);
+    HbWorkspace& w = ws();
 
-    //2.Linear Part
-    std::vector<CMatrix> Yk(H);
-    std::vector<CVector> Jk(H), Ilin_k(H);
-    for(int h = 0; h < H; h++) {
-        double omega_k = h * omega0;
-        buildLinearYJ(h, omega_k, gmin, sourceScale, Yk[h], Jk[h]);
-        Ilin_k[h] = Yk[h] * Vk[h];
+    {
+        ScopedTimer timer(timings, "HB.unpack");
+        unpackRealToHarmonics(x, w.Vk);
     }
 
-    //3.Vk->时域
-    std::vector<Eigen::VectorXd> v_t;
-    harmonicsToTimeDomain(Vk, v_t);
-
-    //4.时域：非线性电流 i_nl(t)，以及 d i / d v;MOS电容电荷Qcap(t_n)
-    Gnl_t_vec.clear();
-    Gnl_t_vec.reserve(nTimeSamples);
-
-    std::vector<Eigen::VectorXd> Inl_t(nTimeSamples, Eigen::VectorXd::Zero(N));
-    for (int n = 0; n < nTimeSamples; ++n) {
-        Eigen::MatrixXd Gnl_t(N, N);
-        evalNonlinearCurrentsAtTime(v_t[n], Inl_t[n], Gnl_t);
-        Gnl_t_vec.push_back(Gnl_t);
+    {
+        ScopedTimer timer(timings, "HB.fft_inverse");
+        harmonicsToTimeDomain(w.Vk, w.v_t);
     }
 
-    // std::vector<Eigen::VectorXd> Qcap_t(nTimeSamples, Eigen::VectorXd::Zero(N));
-    // for(int n = 0; n < nTimeSamples; ++n) {
-    //     evalMosCapChargeAtTime(v_t[n], Qcap_t[n]);
-    // }
+    {
+        ScopedTimer timer(timings, "HB.time_domain_eval");
+        if (static_cast<int>(w.Inl_t.size()) != nTimeSamples) {
+            w.Inl_t.assign(nTimeSamples, Eigen::VectorXd::Zero(N));
+        }
+        if (needGnl && static_cast<int>(w.Gnl_t.size()) != nTimeSamples) {
+            w.Gnl_t.assign(nTimeSamples, Eigen::MatrixXd::Zero(N, N));
+        }
+        for (int n = 0; n < nTimeSamples; ++n) {
+            evalNonlinearCurrentsAtTime(
+                w.v_t[n],
+                w.Inl_t[n],
+                needGnl ? &w.Gnl_t[n] : nullptr
+            );
+        }
+    }
 
-    //5.时域 -> 频域：非线性电流 I_nl(V); Qcap(t_n) -> Qk -> IQ_k
-    std::vector<CVector> Inl_k, Qk;
-    timeDomainToHarmonics(Inl_t, Inl_k);
-    // timeDomainToHarmonics(Qcap_t, Qk);
+    {
+        ScopedTimer timer(timings, "HB.fft_forward");
+        timeDomainToHarmonics(w.Inl_t, w.Inl_k);
+    }
 
+    {
+        ScopedTimer timer(timings, "HB.F_init");
+        // 线性部分
+        for (int h = 0; h < H; ++h) {
+            auto& lin = w.Ilin_k[h];
+            if (lin.size() != N) lin = CVector::Zero(N);
+            lin.noalias() = w.linearYk[h] * w.Vk[h];
+            if (gmin != 0.0) {
+                for (int i = 0; i < N; ++i) {
+                    lin(i) += gmin * w.Vk[h](i);
+                }
+            }
+        }
 
-    //6.非线性电荷 Q(V) 与 ΩQ(V)
-    // std::vector<CVector> Iq_k(H, CVector::Zero(N));
-    // for(int h = 0; h < H; ++h) {
-    //     double omega_k = h * omega0;
-    //     std::complex<double> jw(0.0, omega_k);
-    //     Iq_k[h] = jw * Qk[h];
-    // }
-
-    
-    //7.频域KCL
-    F.resize(numRealVars());
-    F.setZero();
-
-    for(int h = 0;h < H; ++h) {
-        CVector rk = Ilin_k[h] + Inl_k[h] - Jk[h];
-        int base = h * 2 * N;
-        for(int i = 0; i < N; i++) {
-            std::complex<double> val = rk[i];
-            F(base + i) = val.real();
-            F(base + i + N) = val.imag();
+        F.setZero(numRealVars());
+        for (int h = 0; h < H; ++h) {
+            int base = h * 2 * N;
+            for (int i = 0; i < N; ++i) {
+                std::complex<double> val = w.Ilin_k[h](i) - w.linearJk[h](i);
+                F(base + i) = val.real();
+                F(base + i + N) = val.imag();
+            }
+        }
+    }
+    {
+        ScopedTimer timer(timings, "HB.F_add_nonlinear");
+        for (int h = 0; h < H; ++h) {
+            int base = h * 2 * N;
+            for (int i = 0; i < N; ++i) {
+                std::complex<double> val = w.Inl_k[h](i);
+                F(base + i)     += val.real();
+                F(base + i + N) += val.imag();
+            }
         }
     }
 }
@@ -337,69 +523,159 @@ void HbAnalysis::buildJacobianAnalytic(
 ) const {
     const int n = numRealVars();
     const int H = K + 1;
+    (void)sourceScale;
     J.setZero(n, n);
 
+    ScopedTimer timer(timings, "HB.assemble_J");
+    HbWorkspace& w = ws();
+    const int hpLimit = std::min(H, static_cast<int>(w.fftFreq.size()));
+
     // ==== 1) 线性部分：逐谐波块填充，避免 O(n^2) 遍历 ====
-    std::vector<CMatrix> Yk(H);
-    std::vector<CVector> Jk(H);
-    for (int h = 0; h < H; ++h) {
-        double omega_k = h * omega0;
-        buildLinearYJ(h, omega_k, gmin, sourceScale, Yk[h], Jk[h]);
+    {
+        ScopedTimer timerInit(timings, "HB.J_init");
+        for (int h = 0; h < H; ++h) {
+            int rowBase = h * 2 * N;
+            const auto& Yk = w.linearYk[h];
+            for (int ip = 0; ip < N; ++ip) {
+                for (int iq = 0; iq < N; ++iq) {
+                    std::complex<double> Y = Yk(ip, iq);
+                    double yr = Y.real();
+                    double yi = Y.imag();
 
-        int rowBase = h * 2 * N;
-        for (int ip = 0; ip < N; ++ip) {
-            for (int iq = 0; iq < N; ++iq) {
-                std::complex<double> Y = Yk[h](ip, iq);
-                double yr = Y.real();
-                double yi = Y.imag();
+                    int colRe = rowBase + iq;
+                    int colIm = rowBase + N + iq;
 
-                int colRe = rowBase + iq;
-                int colIm = rowBase + N + iq;
-
-                J(rowBase + ip,     colRe) += yr;
-                J(rowBase + ip,     colIm) += -yi;
-                J(rowBase + N + ip, colRe) += yi;
-                J(rowBase + N + ip, colIm) += yr;
+                    J(rowBase + ip,     colRe) += yr;
+                    J(rowBase + ip,     colIm) += -yi;
+                    J(rowBase + N + ip, colRe) += yi;
+                    J(rowBase + N + ip, colIm) += yr;
+                }
+            }
+        }
+    }
+    if (gmin != 0.0) {
+        ScopedTimer timerGmin(timings, "HB.gmin_diag");
+        for (int h = 0; h < H; ++h) {
+            int rowBase = h * 2 * N;
+            for (int ip = 0; ip < N; ++ip) {
+                int rowRe = rowBase + ip;
+                int rowIm = rowBase + N + ip;
+                int colRe = rowBase + ip;
+                int colIm = rowBase + N + ip;
+                J(rowRe, colRe) += gmin;
+                J(rowIm, colIm) += gmin;
             }
         }
     }
 
     // ==== 2) 非线性部分：用 FFT 同时累积所有 hp，复杂度 O(H*N^2*Nfft log Nfft) ====
-    Eigen::FFT<double> fft;
-    std::vector<std::complex<double>> wTime(nTimeSamples);
-    std::vector<std::complex<double>> wSpec;
+    if (static_cast<int>(w.fftTime.size()) != nTimeSamples) {
+        w.fftTime.assign(nTimeSamples, std::complex<double>(0.0, 0.0));
+    }
+    if (static_cast<int>(w.fftFreq.size()) != nTimeSamples) {
+        w.fftFreq.assign(nTimeSamples, std::complex<double>(0.0, 0.0));
+    }
+
     const double fftScale = 1.0 / static_cast<double>(nTimeSamples);
 
-    for (int q = 0; q < n; ++q) {
-        HbVarIndex vq   = decodeVarIndex(q);
-        int hq          = vq.h;
-        int iq          = vq.node;
-        bool isReQ      = vq.isReal;
-        if (iq >= N || hq >= H) continue;
-
-        // h=0 的虚部列对时域电压无影响，直接跳过
-        if (hq == 0 && !isReQ) continue;
-
-        const auto& dv_dx = isReQ ? dvRealTable[hq] : dvImagTable[hq];
-
-        for (int ip = 0; ip < N; ++ip) {
-            // wTime = Gnl(ip,iq,t) * dv_dx(t)
-            for (int n_t = 0; n_t < nTimeSamples; ++n_t) {
-                double g = Gnl_t_vec[n_t](ip, iq);
-                wTime[n_t] = std::complex<double>(g * dv_dx[n_t], 0.0);
+    {
+        ScopedTimer timerAdd(timings, "HB.J_add_nonlinear");
+        const int activeCount = static_cast<int>(w.qActiveList.size());
+        if (static_cast<int>(w.qColPtr.size()) != activeCount) {
+            w.qColPtr.resize(activeCount, nullptr);
+        }
+        double* jData = J.data();
+        for (int qi = 0; qi < activeCount; ++qi) {
+            int q = w.qActiveList[qi];
+            w.qColPtr[qi] = jData + q * J.rows();
+        }
+        const int nRows = J.rows();
+        auto processRange = [&](int qStart, int qEnd,
+                                Eigen::VectorXd& deltaCol,
+                                std::vector<std::complex<double>>& fftTime,
+                                std::vector<std::complex<double>>& fftFreq,
+                                Eigen::FFT<double>& fft) {
+            if (deltaCol.size() != nRows) {
+                deltaCol = Eigen::VectorXd::Zero(nRows);
+            }
+            if (static_cast<int>(fftTime.size()) != nTimeSamples) {
+                fftTime.assign(nTimeSamples, std::complex<double>(0.0, 0.0));
+            }
+            if (static_cast<int>(fftFreq.size()) != nTimeSamples) {
+                fftFreq.assign(nTimeSamples, std::complex<double>(0.0, 0.0));
             }
 
-            fft.fwd(wSpec, wTime);
+            for (int qi = qStart; qi < qEnd; ++qi) {
+                int iq = w.qNodeActive[qi];
+                const double* dv_dx = w.qDvActive[qi];
+                double* Jcol = w.qColPtr[qi];
+                if (!dv_dx || !Jcol) continue;
+                deltaCol.setZero();
+                double* deltaData = deltaCol.data();
 
-            for (int hp = 0; hp < H && hp < static_cast<int>(wSpec.size()); ++hp) {
-                std::complex<double> dInl = wSpec[hp] * fftScale;
+                for (int ip = 0; ip < N; ++ip) {
+                    // wTime = Gnl(ip,iq,t) * dv_dx(t)
+                    for (int n_t = 0; n_t < nTimeSamples; ++n_t) {
+                        const auto& Gnl = Gnl_t_vec[n_t];
+                        const double* gcol = Gnl.data() + static_cast<std::ptrdiff_t>(iq) * N;
+                        double g = gcol[ip];
+                        fftTime[n_t] = std::complex<double>(g * dv_dx[n_t], 0.0);
+                    }
 
-                int rowBase = hp * 2 * N;
-                int rowRe   = rowBase + ip;
-                int rowIm   = rowBase + N + ip;
+                    fft.fwd(fftFreq, fftTime);
 
-                J(rowRe, q) += dInl.real();
-                J(rowIm, q) += dInl.imag();
+                    for (int hp = 0; hp < hpLimit; ++hp) {
+                        std::complex<double> dInl = fftFreq[hp] * fftScale;
+
+                        int rowBase = w.rowBaseByH[hp];
+                        int rowBaseIm = w.rowBaseImByH[hp];
+                        int rowRe     = rowBase + ip;
+                        int rowIm     = rowBaseIm + ip;
+
+                        deltaData[rowRe] += dInl.real();
+                        deltaData[rowIm] += dInl.imag();
+                    }
+                }
+                for (int row = 0; row < nRows; ++row) {
+                    Jcol[row] += deltaData[row];
+                }
+            }
+        };
+
+        const auto& opts = runtimeOptions();
+        int numThreads = 1;
+        if (opts.parallel && activeCount > 1) {
+            numThreads = (opts.threads > 0)
+                ? opts.threads
+                : static_cast<int>(std::thread::hardware_concurrency());
+            if (numThreads <= 0) numThreads = 1;
+            if (numThreads > activeCount) numThreads = activeCount;
+        }
+
+        if (numThreads <= 1) {
+            processRange(0, activeCount, w.deltaCol, w.fftTime, w.fftFreq, w.fft);
+        } else {
+            if (static_cast<int>(w.jacScratch.size()) != numThreads) {
+                w.jacScratch.resize(numThreads);
+            }
+            const int chunk = (activeCount + numThreads - 1) / numThreads;
+            std::vector<std::thread> threads;
+            threads.reserve(numThreads);
+            for (int t = 0; t < numThreads; ++t) {
+                int start = t * chunk;
+                int end = std::min(activeCount, start + chunk);
+                if (start >= end) break;
+                threads.emplace_back([&, start, end, t]() {
+                    auto& scratch = w.jacScratch[t];
+                    processRange(start, end,
+                                 scratch.deltaCol,
+                                 scratch.fftTime,
+                                 scratch.fftFreq,
+                                 scratch.fft);
+                });
+            }
+            for (auto& th : threads) {
+                th.join();
             }
         }
     }
@@ -409,24 +685,39 @@ void HbAnalysis::buildJacobianAnalytic(
 bool HbAnalysis::newtonSolve(Eigen::VectorXd& x, double rampScale, double& bestResidual, bool allowRelax) const {
     const int n        = numRealVars();
     const int maxIters = 40;
+    const int logEvery = 5;
 
     ConvController ctrl = ConvController::forHb();
+    HbWorkspace& w = ws();
 
     double alpha   = ctrl.params().alphaInit;
     double gmin    = ctrl.baseGmin(rampScale);
     double prevStep= std::numeric_limits<double>::infinity();
+    bool loggedSolveSize = false;
 
-    Eigen::VectorXd F(n), Ftry(n);
+    Eigen::VectorXd& F    = w.F;
+    Eigen::VectorXd& Ftry = w.Ftry;
+    Eigen::MatrixXd& J    = w.J;
+    Eigen::VectorXd& dx   = w.dx;
     Eigen::VectorXd bestX = x;
     double bestNorm = std::numeric_limits<double>::infinity();
     bestResidual = bestNorm;
 
+    prepareLinearCache(rampScale);
+
     for (int it = 0; it < maxIters; ++it) {
+        ScopedTimer iterTimer(timings, "HB.total_iter");
         // ===== 1) 残差 F(x) + 时域 Gnl(t) =====
-        std::vector<Eigen::MatrixXd> Gnl_t_vec;
-        computeResidualAndTimeDomainJacobian(x, gmin, rampScale, F, Gnl_t_vec);
+        computeResidualAndTimeDomainJacobian(x, gmin, rampScale, F, /*needGnl=*/true);
 
         const double normF = F.norm();
+        if (it == 0 || ((it + 1) % logEvery) == 0) {
+            std::cout << "[HB] iter " << (it + 1) << "/" << maxIters
+                      << " scale=" << rampScale
+                      << " ||F||=" << normF
+                      << " alpha=" << alpha
+                      << " gmin=" << gmin << "\n";
+        }
         if (normF < bestNorm) {
             bestNorm = normF;
             bestX    = x;
@@ -444,11 +735,28 @@ bool HbAnalysis::newtonSolve(Eigen::VectorXd& x, double rampScale, double& bestR
         }
 
         // ===== 2) 构造 Jacobian =====
-        Eigen::MatrixXd J(n, n);
-        buildJacobianAnalytic(x, gmin, rampScale, Gnl_t_vec, J);
+        buildJacobianAnalytic(x, gmin, rampScale, w.Gnl_t, J);
 
         // ===== 3) 解线性方程 J dx = -F =====
-        Eigen::VectorXd dx = Solver::solveLinearSystemLU(J, -F);
+        if (!loggedSolveSize) {
+            std::cout << "[HB] solve_linear n=" << J.rows() << "\n";
+            loggedSolveSize = true;
+        }
+        w.rhs = -F;
+        bool luOk = false;
+        {
+            ScopedTimer timer(timings, "HB.solve_factorize");
+            luOk = Solver::luFactorizeInPlace(J, w.luPerm, timings);
+            if (!luOk) {
+                std::cerr << "[HB] LU failed, fallback to zero solution.\n";
+            }
+        }
+        if (!luOk) {
+            dx.setZero();
+        } else {
+            ScopedTimer timer(timings, "HB.solve_backsolve");
+            Solver::luSolveInPlace(J, w.luPerm, w.rhs, dx);
+        }
         if (!dx.allFinite()) {
             // 线性解拒绝：提高 gmin，减小 alpha，重来
             ctrl.onLinearReject(alpha, gmin);
@@ -471,8 +779,8 @@ bool HbAnalysis::newtonSolve(Eigen::VectorXd& x, double rampScale, double& bestR
         for (int bt = 0; bt < maxBT; ++bt) {
             xNext = x + alphaTry * dx;
 
-            std::vector<Eigen::MatrixXd> dummy;
-            computeResidualAndTimeDomainJacobian(xNext, gminTry, rampScale, Ftry, dummy);
+            ScopedTimer lsTimer(timings, "HB.line_search");
+            computeResidualAndTimeDomainJacobian(xNext, gminTry, rampScale, Ftry, /*needGnl=*/false);
             const double normFtry = Ftry.norm();
 
             // 只要 residual 下降就接受（HB 这里比 Armijo 更实用、更稳）
@@ -580,6 +888,10 @@ bool HbAnalysis::run(Eigen::VectorXd& xOut) const {
         std::cerr << "[HB] Invalid configuration.\n";
         return false;
     }
+    std::cout << "[HB] Config: f0=" << f0
+              << " nHarm=" << K
+              << " nTimeSamples=" << nTimeSamples
+              << " nVars=" << numRealVars() << "\n";
 
     Eigen::VectorXd x(numRealVars());
     x.setZero();
@@ -601,7 +913,9 @@ bool HbAnalysis::run(Eigen::VectorXd& xOut) const {
         std::vector<Eigen::VectorXd> samples;
         samples.reserve(nTimeSamples);
 
-        TransientAnalysis tran(ckt, sim, "hb_init_dummy.csv");
+        TransientAnalysis tran(ckt, sim, "hb_init_dummy.csv", timings);
+        std::cout << "[HB] Init: integrating one period (BE), dt=" << dt
+                  << " steps=" << nTimeSamples << "\n";
         auto dump = [&](double /*t*/, const Eigen::VectorXd& xt) {
             if (static_cast<int>(samples.size()) < nTimeSamples) {
                 samples.push_back(xt);
@@ -635,7 +949,7 @@ bool HbAnalysis::run(Eigen::VectorXd& xOut) const {
         SimulationConfig simCoarse = sim;
         simCoarse.hb.nHarm = coarseK;
         try {
-            HbAnalysis coarse(ckt, simCoarse, xdc);
+            HbAnalysis coarse(ckt, simCoarse, xdc, timings);
             Eigen::VectorXd xCoarse;
             if (coarse.run(xCoarse)) {
                 // 覆盖初始猜测
@@ -670,6 +984,7 @@ bool HbAnalysis::run(Eigen::VectorXd& xOut) const {
     double bestScaleReached = 0.0;
     double bestResidualSeen = std::numeric_limits<double>::infinity();
     for (double target : rampTargets) {
+        std::cout << "[HB] Continuation target scale=" << target << "\n";
         double current = prevScale;
         double step    = target - current;
         int    guard   = 0;
@@ -688,6 +1003,8 @@ bool HbAnalysis::run(Eigen::VectorXd& xOut) const {
                 x        = std::move(xTry);
                 current   = next;
                 prevScale = current;
+                std::cout << "[HB] scale=" << current
+                          << " converged (residual=" << res << ")\n";
                 if (res < bestResidualSeen) {
                     bestResidualSeen = res;
                     xBestScale = x;
