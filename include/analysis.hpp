@@ -10,8 +10,6 @@
 #include <functional>
 #include <memory>
 
-class TimingRegistry;
-
 
 enum class DcSolverKind {
     LU,
@@ -144,7 +142,6 @@ private:
     const Circuit& ckt;
     const SimulationConfig& sim;
     DcSolverKind solverKind;
-    TimingRegistry* timings = nullptr;
     struct DcWorkspace;
     mutable std::unique_ptr<DcWorkspace> workspace;
     mutable double linearStampScale = std::numeric_limits<double>::quiet_NaN();
@@ -165,8 +162,7 @@ private:
 public:
     explicit DcAnalysis(const Circuit& ckt_,
                         const SimulationConfig& SimulationConfig,
-                        DcSolverKind solver_ = DcSolverKind::GaussSeidel,
-                        TimingRegistry* timings_ = nullptr);
+                        DcSolverKind solver_ = DcSolverKind::GaussSeidel);
     ~DcAnalysis();
 
     // 对外唯一入口：自动判断是否有非线性器件，调用合适的路径
@@ -181,8 +177,7 @@ class TransientAnalysis {
 public:
     TransientAnalysis(const Circuit& ckt,
                       const SimulationConfig& sim,
-                      const std::string& outFile = "tran_out.csv",
-                      TimingRegistry* timings_ = nullptr);
+                      const std::string& outFile = "tran_out.csv");
 
     void runBackwardEuler();
 
@@ -199,7 +194,6 @@ private:
     const Circuit& ckt;
     const SimulationConfig& sim;
     std::string outFile;
-    TimingRegistry* timings = nullptr;
         
     friend class DcAnalysis;
      // 从 DC 求工作点：内部直接用 DcAnalysis
@@ -233,7 +227,6 @@ private:
     const Circuit& ckt;
     const SimulationConfig& sim;
     Eigen::VectorXd xdc;   // DC 工作点
-    TimingRegistry* timings = nullptr;
 
     int    N;             // MNA unknown 数
     int    K;             // 谐波阶数（sim.hb.nHarm）
@@ -311,8 +304,7 @@ private:
 public:
     HbAnalysis(const Circuit& ckt,
                const SimulationConfig& sim,
-               const Eigen::VectorXd& dcOp,
-               TimingRegistry* timings_ = nullptr);
+               const Eigen::VectorXd& dcOp);
     ~HbAnalysis();
     bool run(Eigen::VectorXd& xOut, const std::string& outFile) const;
     bool run(Eigen::VectorXd& xOut) const;

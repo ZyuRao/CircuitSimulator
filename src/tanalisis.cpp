@@ -12,7 +12,6 @@
 #include "element.hpp"
 #include "sim.hpp"
 #include "solver.hpp"
-#include "timing.hpp"
 #include "utils.hpp"
 
 using Eigen::MatrixXd;
@@ -21,12 +20,11 @@ using Eigen::VectorXd;
 
 TransientAnalysis::TransientAnalysis(const Circuit& ckt_,
                                      const SimulationConfig& sim_,
-                                     const std::string& outFile_,
-                                     TimingRegistry* timings_)
-    : ckt(ckt_), sim(sim_), outFile(outFile_), timings(timings_) {}
+                                     const std::string& outFile_)
+    : ckt(ckt_), sim(sim_), outFile(outFile_) {}
 
 VectorXd TransientAnalysis::computeDcOperatingPoint() const {
-    DcAnalysis dc(ckt, sim, DcSolverKind::GaussSeidel, timings); // 或LU
+    DcAnalysis dc(ckt, sim, DcSolverKind::GaussSeidel); // 或LU
     return dc.run();
 }
 
@@ -236,12 +234,16 @@ void TransientAnalysis::runBackwardEuler() {
     };
 
     // ===== 3. 时间步循环：Newton + LU + 后向欧拉 =====
-    std::cout << "[TRAN] tstep="  << std::scientific << cfg.tstep
-              << ", tstop="       << cfg.tstop
-              << ", tstart="      << cfg.tstart << "\n";
+    if (sim.verbose) {
+        std::cout << "[TRAN] tstep="  << std::scientific << cfg.tstep
+                  << ", tstop="       << cfg.tstop
+                  << ", tstart="      << cfg.tstart << "\n";
+    }
 
     int nSteps = static_cast<int>(std::floor(tstop / dt + 1e-12));
-    std::cout << "[TRAN] total steps = " << nSteps << "\n";
+    if (sim.verbose) {
+        std::cout << "[TRAN] total steps = " << nSteps << "\n";
+    }
 
     const int    maxNewtonIters = 50;
     const double tol            = 1e-6;
@@ -416,8 +418,10 @@ void TransientAnalysis::runBackwardEuler() {
         dumpRow(tNow, x);
     }
 
-    std::cout << "Transient analysis (Backward Euler) finished. "
-              << "Results written to '" << outFile << "'.\n";
+    if (sim.verbose) {
+        std::cout << "Transient analysis (Backward Euler) finished. "
+                  << "Results written to '" << outFile << "'.\n";
+    }
 }
 
 // ========= 梯形法瞬态（Trapezoidal Rule） =========
@@ -590,12 +594,16 @@ void TransientAnalysis::runTrapezoidal(){
     };
 
     // ===== 3. 主时间步循环（Trapezoidal + ConvController） =====
-    std::cout << "[TRAN-TR] tstep=" << std::scientific << dt
-              << ", tstop="        << tstop
-              << ", tstart="       << tstart << "\n";
+    if (sim.verbose) {
+        std::cout << "[TRAN-TR] tstep=" << std::scientific << dt
+                  << ", tstop="        << tstop
+                  << ", tstart="       << tstart << "\n";
+    }
 
     int totalSteps = static_cast<int>(std::floor(tstop / dt + 1e-12));
-    std::cout << "[TRAN-TR] total steps = " << totalSteps << "\n";
+    if (sim.verbose) {
+        std::cout << "[TRAN-TR] total steps = " << totalSteps << "\n";
+    }
 
     VectorXd x         = xdc;   // 当前解
     VectorXd xPrevStep = xdc;   // 上一时间步的解（做线性预测用）
@@ -835,8 +843,10 @@ void TransientAnalysis::runTrapezoidal(){
         dumpRow(tNow, x);
     }
 
-    std::cout << "Transient analysis (Trapezoidal + ConvController) finished. "
-              << "Results written to '" << outFile << "'.\n";
+    if (sim.verbose) {
+        std::cout << "Transient analysis (Trapezoidal + ConvController) finished. "
+                  << "Results written to '" << outFile << "'.\n";
+    }
 }
 
 // ========= 后向欧拉单周期积分（用于周期性稳态分析） =========

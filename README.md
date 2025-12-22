@@ -60,42 +60,13 @@ cmake --build build -j
 - out/name_tran.csv
 - out/name_hb.csv
 - out/name_shoot.csv
-- out/name_timing.csv
 
 .`PROBE`触发的图片命名：
 - out/name_<analysis>_probe.png
 
-## 性能计时
-运行时会输出 `Timing summary (ms)`，并写出 `out/name_timing.csv`（wall time，单位 ms）。
-若 TRAN/HB 并行执行，分项耗时会与 `total_wall` 有重叠。
-
-## 推荐运行参数（性能）
-默认已启用并行装配（`CSIM_PARALLEL=1`），推荐 benchmark 参数如下（可用环境变量覆盖）：
-
-- `CSIM_LU_TRAIL_PAR=1`
-- `CSIM_THREADS=8`
-- `CSIM_LU_BLOCK=16`
-- `CSIM_LU_THRESHOLD=64`
-
-默认线程数为 `min(16, hardware_concurrency)`；设置 `CSIM_THREADS=0` 表示使用默认值。绘图行为仍仅由 `.PROBE` 控制。
-
-实验开关（默认关闭）：
-- `CSIM_LU_TRAIL_PAR=1`：并行化 LU 的 trailing update（需 OpenMP 支持）
-
-## 稳定性/消毒器测试（可选）
-**压力测试（本地/CI）**：循环运行 200 次以捕捉偶发崩溃或不稳定。
-```bash
-scripts/stress_run.sh tests/buffer.sp 200
-```
-
-**Sanitizer 构建**（用于排查越界/UB/数据竞争）：
-```bash
-cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DCSIM_ENABLE_PROF=ON \
-  -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
-cmake --build build-asan -j
-ASAN_OPTIONS=halt_on_error=1:abort_on_error=1 ./build-asan/CircuitSimulator tests/buffer.sp
-```
-> 注：Sanitizer 仅用于稳定性诊断，不用于性能评测。
+## 运行时总耗时输出
+程序结束时会输出一次总运行时间：
+`[TIME] total_wall_ms=...`
 
 ## 网表语法手册（以当前 Parser 实现为准）
 

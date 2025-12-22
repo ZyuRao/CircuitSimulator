@@ -4,8 +4,6 @@
 #include "solver.hpp"
 #include "sim.hpp"
 #include "utils.hpp"
-#include "timing.hpp"
-
 #include <iostream>
 #include <memory>
 #include <limits>
@@ -28,9 +26,8 @@ DcAnalysis::~DcAnalysis() = default;
 
 DcAnalysis::DcAnalysis(const Circuit& ckt_,
                        const SimulationConfig& sim_,
-                       DcSolverKind solver_,
-                       TimingRegistry* timings_)
-    : ckt(ckt_), sim(sim_), solverKind(solver_), timings(timings_) {}
+                       DcSolverKind solver_)
+    : ckt(ckt_), sim(sim_), solverKind(solver_) {}
 
 AnalysisContext DcAnalysis::makeDcCtx(double sourceScale) {
     AnalysisContext ctx;
@@ -64,7 +61,6 @@ void DcAnalysis::buildLinearStamp(int N, double sourceScale) const {
     if (!std::isnan(linearStampScale) && std::abs(linearStampScale - sourceScale) < 1e-15) {
         return;
     }
-    ScopedTimer timer(timings, "DC.stamp_linear_prepare");
     w.linearG.setZero();
     w.linearI.setZero();
     w.xBuf.setZero();
@@ -193,29 +189,19 @@ VectorXd DcAnalysis::solveNewtonLU() const {
         bool stepOK = false;
         double lastRes = std::numeric_limits<double>::infinity();
         for (int iter = 0; iter < maxNewtonIters; ++iter) {
-            ScopedTimer iterTimer(timings, "DC.total_iter");
-            {
-                ScopedTimer timer(timings, "DC.stamp_linear");
-                w.G = w.linearG;
-                w.I = w.linearI;
-            }
+            w.G = w.linearG;
+            w.I = w.linearI;
 
             AnalysisContext ctx = makeDcCtx(scale);
 
             // 对当前迭代的 x 线性化并 stamp
-            {
-                ScopedTimer timer(timings, "DC.stamp_nonlinear");
-                for (const auto* m : cache.mos) {
-                    m->stamp(w.G, w.I, ckt, x, ctx);
-                }
-                stampGlobalGmin(ckt, w.G, gmin);
+            for (const auto* m : cache.mos) {
+                m->stamp(w.G, w.I, ckt, x, ctx);
             }
+            stampGlobalGmin(ckt, w.G, gmin);
 
             // 解 G x_new = I
-            {
-                ScopedTimer timer(timings, "DC.solve_linear");
-                w.xBuf = Solver::solveLinearSystemLU(w.G, w.I);
-            }
+            w.xBuf = Solver::solveLinearSystemLU(w.G, w.I);
             if (!w.xBuf.allFinite()) {
                 gmin = std::min(gmin * 10.0, ctrl.params().gminAbsMax);
                 continue;
@@ -293,18 +279,11 @@ VectorXd DcAnalysis::solveNewtonGS() const {
         const int maxNewtonIters = 60;
 
         for (int it = 0; it < maxNewtonIters; ++it) {
-            ScopedTimer iterTimer(timings, "DC.total_iter");
-            {
-                ScopedTimer timer(timings, "DC.stamp_linear");
-                w.G = w.linearG;
-                w.I = w.linearI;
-            }
-            {
-                ScopedTimer timer(timings, "DC.stamp_nonlinear");
-                AnalysisContext ctx = makeDcCtx(targetScale);
-                for (const auto* m : cache.mos) m->stamp(w.G, w.I, ckt, xTry, ctx);
-                stampGlobalGmin(ckt, w.G, gmin);
-            }
+            w.G = w.linearG;
+            w.I = w.linearI;
+            AnalysisContext ctx = makeDcCtx(targetScale);
+            for (const auto* m : cache.mos) m->stamp(w.G, w.I, ckt, xTry, ctx);
+            stampGlobalGmin(ckt, w.G, gmin);
 
             double Fnorm = (w.G * xTry - w.I).norm();
             double tolF  = ctrl.residualTol(w.I.norm());

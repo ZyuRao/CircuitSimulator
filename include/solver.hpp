@@ -8,7 +8,6 @@
 #include <random>
 #include <limits>
 #include "runtime.hpp"
-#include "timing.hpp"
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -42,8 +41,7 @@ namespace Solver {
     //通用LU（部分主元，原地分解，非分块）
     template <typename MatrixType>
     inline bool luFactorizeInPlaceUnblocked(MatrixType& A,
-                                            std::vector<int>& perm,
-                                            TimingRegistry* timings = nullptr) {
+                                            std::vector<int>& perm) {
         using std::abs;
         const int n = static_cast<int>(A.rows());
         if (A.cols() != n) {
@@ -54,22 +52,10 @@ namespace Solver {
         perm.resize(n);
         for (int i = 0; i < n; ++i) perm[i] = i;
 
-#ifdef ENABLE_PROF
-        const bool doTiming = (timings != nullptr);
-        double tPivotSearch = 0.0;
-        double tPivotApply = 0.0;
-        double tPanelFactor = 0.0;
-        double tTrailingUpdate = 0.0;
-        Timer timer;
-#endif
-
         for (int k = 0; k < n; ++k) {
             // 选主元
             int pivot = k;
             auto maxVal = abs(A(k, k));
-#ifdef ENABLE_PROF
-            if (doTiming) timer.reset();
-#endif
             for (int i = k + 1; i < n; ++i) {
                 auto v = abs(A(i, k));
                 if (v > maxVal) {
@@ -77,58 +63,29 @@ namespace Solver {
                     pivot = i;
                 }
             }
-#ifdef ENABLE_PROF
-            if (doTiming) tPivotSearch += timer.elapsedMs();
-#endif
 
             if (maxVal == typename MatrixType::Scalar(0)) {
                 std::cerr << "LU: singular matrix at column " << k << "\n";
                 return false;
             }
 
-#ifdef ENABLE_PROF
-            if (doTiming) timer.reset();
-#endif
             if (pivot != k) {
                 A.row(k).swap(A.row(pivot));
                 std::swap(perm[k], perm[pivot]);
             }
-#ifdef ENABLE_PROF
-            if (doTiming) tPivotApply += timer.elapsedMs();
-#endif
 
             // 消元（列优先访问，匹配 Eigen 默认列主存储）
             auto pivotInv = typename MatrixType::Scalar(1) / A(k, k);
-#ifdef ENABLE_PROF
-            if (doTiming) timer.reset();
-#endif
             for (int i = k + 1; i < n; ++i) {
                 A(i, k) *= pivotInv;
             }
-#ifdef ENABLE_PROF
-            if (doTiming) tPanelFactor += timer.elapsedMs();
-#endif
-#ifdef ENABLE_PROF
-            if (doTiming) timer.reset();
-#endif
             for (int j = k + 1; j < n; ++j) {
                 auto Ukj = A(k, j);
                 for (int i = k + 1; i < n; ++i) {
                     A(i, j) -= A(i, k) * Ukj;
                 }
             }
-#ifdef ENABLE_PROF
-            if (doTiming) tTrailingUpdate += timer.elapsedMs();
-#endif
         }
-#ifdef ENABLE_PROF
-        if (doTiming) {
-            timings->add("LU.pivot_search", tPivotSearch);
-            timings->add("LU.pivot_apply", tPivotApply);
-            timings->add("LU.panel_factor", tPanelFactor);
-            timings->add("LU.trailing_update", tTrailingUpdate);
-        }
-#endif
         return true;
     }
 
@@ -136,8 +93,7 @@ namespace Solver {
     template <typename MatrixType>
     inline bool luFactorizeInPlaceBlocked(MatrixType& A,
                                           std::vector<int>& perm,
-                                          int blockSize = 32,
-                                          TimingRegistry* timings = nullptr) {
+                                          int blockSize = 32) {
         using std::abs;
         const int n = static_cast<int>(A.rows());
         if (A.cols() != n) {
@@ -145,7 +101,7 @@ namespace Solver {
             return false;
         }
         if (blockSize <= 0) {
-            return luFactorizeInPlaceUnblocked(A, perm, timings);
+            return luFactorizeInPlaceUnblocked(A, perm);
         }
         const auto& opts = runtimeOptions();
         const int gemmBlockSize = opts.luGemmBlockSize;
@@ -161,15 +117,6 @@ namespace Solver {
         perm.resize(n);
         for (int i = 0; i < n; ++i) perm[i] = i;
 
-#ifdef ENABLE_PROF
-        const bool doTiming = (timings != nullptr);
-        double tPivotSearch = 0.0;
-        double tPivotApply = 0.0;
-        double tPanelFactor = 0.0;
-        double tTrailingUpdate = 0.0;
-        Timer timer;
-#endif
-
         for (int k = 0; k < n; k += blockSize) {
             int nb = std::min(blockSize, n - k);
 
@@ -177,9 +124,6 @@ namespace Solver {
             for (int col = k; col < k + nb; ++col) {
                 int pivot = col;
                 auto maxVal = abs(A(col, col));
-#ifdef ENABLE_PROF
-                if (doTiming) timer.reset();
-#endif
                 for (int i = col + 1; i < n; ++i) {
                     auto v = abs(A(i, col));
                     if (v > maxVal) {
@@ -187,30 +131,18 @@ namespace Solver {
                         pivot = i;
                     }
                 }
-#ifdef ENABLE_PROF
-                if (doTiming) tPivotSearch += timer.elapsedMs();
-#endif
 
                 if (maxVal == typename MatrixType::Scalar(0)) {
                     std::cerr << "LU: singular matrix at column " << col << "\n";
                     return false;
                 }
 
-#ifdef ENABLE_PROF
-                if (doTiming) timer.reset();
-#endif
                 if (pivot != col) {
                     A.row(col).swap(A.row(pivot));
                     std::swap(perm[col], perm[pivot]);
                 }
-#ifdef ENABLE_PROF
-                if (doTiming) tPivotApply += timer.elapsedMs();
-#endif
 
                 auto pivotInv = typename MatrixType::Scalar(1) / A(col, col);
-#ifdef ENABLE_PROF
-                if (doTiming) timer.reset();
-#endif
                 for (int i = col + 1; i < n; ++i) {
                     A(i, col) *= pivotInv;
                 }
@@ -221,18 +153,12 @@ namespace Solver {
                         A(i, j) -= A(i, col) * Ucj;
                     }
                 }
-#ifdef ENABLE_PROF
-                if (doTiming) tPanelFactor += timer.elapsedMs();
-#endif
             }
 
             int trailing = k + nb;
             if (trailing >= n) continue;
 
             // ===== U12 = L11^{-1} * A12 =====
-#ifdef ENABLE_PROF
-            if (doTiming) timer.reset();
-#endif
             for (int j = trailing; j < n; ++j) {
                 for (int i = k; i < k + nb; ++i) {
                     for (int p = k; p < i; ++p) {
@@ -240,18 +166,12 @@ namespace Solver {
                     }
                 }
             }
-#ifdef ENABLE_PROF
-            if (doTiming) tPanelFactor += timer.elapsedMs();
-#endif
 
             // ===== A22 -= L21 * U12 =====
             const int trailingSize = n - trailing;
             auto A22 = A.block(trailing, trailing, trailingSize, trailingSize);
             const auto L21 = A.block(trailing, k, trailingSize, nb);
             const auto U12 = A.block(k, trailing, nb, trailingSize);
-#ifdef ENABLE_PROF
-            if (doTiming) timer.reset();
-#endif
             const bool trailPar = opts.luTrailParallel && opts.parallel && (opts.threads > 1);
             const int minTrailCols = 128;
             if (trailPar && trailingSize >= minTrailCols) {
@@ -289,18 +209,7 @@ namespace Solver {
             } else {
                 A22.noalias() -= L21 * U12;
             }
-#ifdef ENABLE_PROF
-            if (doTiming) tTrailingUpdate += timer.elapsedMs();
-#endif
         }
-#ifdef ENABLE_PROF
-        if (doTiming) {
-            timings->add("LU.pivot_search", tPivotSearch);
-            timings->add("LU.pivot_apply", tPivotApply);
-            timings->add("LU.panel_factor", tPanelFactor);
-            timings->add("LU.trailing_update", tTrailingUpdate);
-        }
-#endif
 #ifdef _OPENMP
         if (restoreEigenThreads) {
             Eigen::setNbThreads(prevEigenThreads);
@@ -312,8 +221,7 @@ namespace Solver {
     //通用LU（部分主元，原地分解，自动选择）
     template <typename MatrixType>
     inline bool luFactorizeInPlace(MatrixType& A,
-                                   std::vector<int>& perm,
-                                   TimingRegistry* timings = nullptr) {
+                                   std::vector<int>& perm) {
         const int n = static_cast<int>(A.rows());
         const auto& opts = runtimeOptions();
         int blockSize = opts.luBlockSize;
@@ -321,9 +229,9 @@ namespace Solver {
         if (blockSize <= 0) blockSize = 32;
         if (threshold <= 0) threshold = blockSize * 2;
         if (n < threshold) {
-            return luFactorizeInPlaceUnblocked(A, perm, timings);
+            return luFactorizeInPlaceUnblocked(A, perm);
         }
-        return luFactorizeInPlaceBlocked(A, perm, blockSize, timings);
+        return luFactorizeInPlaceBlocked(A, perm, blockSize);
     }
 
     //通用LU（部分主元，复制输入）

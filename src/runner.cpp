@@ -3,8 +3,6 @@
 #include "element.hpp"
 #include "runner.hpp"
 #include "analysis.hpp"
-#include "timing.hpp"
-
 #include <future>
 #include <filesystem>
 #include <fstream>
@@ -19,26 +17,6 @@
 namespace {
 
 using ColumnMap = std::unordered_map<std::string, int>;
-
-struct TimingFinalizer {
-    TimingRegistry& registry;
-    Timer& totalTimer;
-    std::string csvPath;
-    bool enabled = profilingEnabled();
-
-    ~TimingFinalizer() {
-        if (!enabled || !profilingEnabled()) return;
-        registry.add("total_wall", totalTimer.elapsedMs());
-        registry.print(std::cout);
-        if (!csvPath.empty()) {
-            if (registry.writeCsv(csvPath)) {
-                std::cout << "Timing CSV: " << csvPath << "\n";
-            } else {
-                std::cerr << "Failed to write timing CSV: " << csvPath << "\n";
-            }
-        }
-    }
-};
 
 std::string analysisTag(AnalysisType a) {
     switch (a) {
@@ -355,37 +333,25 @@ bool writeFullStaticCsv(const Circuit& ckt,
 
 } // namespace
 
-Runner::Runner(const std::string& outDir_) : outDir(outDir_) {}
+Runner::Runner(const std::string& outDir_, bool verbose_)
+    : outDir(outDir_), verbose(verbose_) {}
 
 int Runner::run(const std::string& netlistPath) {
-    TimingRegistry timings;
-    Timer totalTimer;
-    TimingFinalizer timingFinalizer{timings, totalTimer};
-
     Circuit ckt;
     SimulationConfig sim;
 
-    std::cout << "Reading netlist: " << netlistPath << "\n";
-    {
-        ScopedTimer timer(timings, "parse_netlist");
-        if (!parseNetlist(netlistPath, ckt, sim)) {
-            std::cerr << "Parse netlist failed.\n";
-            return 1;
-        }
+    if (verbose) {
+        std::cout << "Reading netlist: " << netlistPath << "\n";
     }
-    {
-        ScopedTimer timer(timings, "assign_eq_indices");
-        ckt.assignEquationIndices();
+    if (!parseNetlist(netlistPath, ckt, sim)) {
+        std::cerr << "Parse netlist failed.\n";
+        return 1;
     }
+    ckt.assignEquationIndices();
+    sim.verbose = verbose;
 
     std::filesystem::create_directories(outDir);
     std::filesystem::path caseStem = std::filesystem::path(netlistPath).stem();
-    if (profilingEnabled()) {
-        timingFinalizer.enabled = true;
-        timingFinalizer.csvPath =
-            (std::filesystem::path(outDir) / (caseStem.string() + "_timing.csv")).string();
-    }
-
     auto csvPath = [&](const std::string& tag) {
         return (std::filesystem::path(outDir) / (caseStem.string() + "_" + tag + ".csv")).string();
     };
@@ -400,9 +366,7 @@ int Runner::run(const std::string& netlistPath) {
     auto ensureOp = [&]() -> const Eigen::VectorXd& {
         std::lock_guard<std::mutex> lock(opMutex);
         if (!opReady) {
-            ScopedTimer timer(timings, "op_solve");
-            DcAnalysis dc(ckt, sim, DcSolverKind::GaussSeidel,
-                          profilingEnabled() ? &timings : nullptr);
+            DcAnalysis dc(ckt, sim, DcSolverKind::GaussSeidel);
             opSolution = dc.run();
             opReady = true;
         }
@@ -411,24 +375,20 @@ int Runner::run(const std::string& netlistPath) {
 
     // OP
     if (sim.doOp) {
-        std::cout << "[OP] Running operating point\n";
+        if (sim.verbose) {
+            std::cout << "[OP] Running operating point\n";
+        }
         const Eigen::VectorXd& xop = ensureOp();
         std::string raw = rawPath("op");
         std::string finalCsv = csvPath("op");
-        {
-            ScopedTimer timer(timings, "op_write_raw");
-            if (!writeFullStaticCsv(ckt, xop, raw)) {
-                std::cerr << "[OP] Failed to write raw CSV\n";
-                return 2;
-            }
+        if (!writeFullStaticCsv(ckt, xop, raw)) {
+            std::cerr << "[OP] Failed to write raw CSV\n";
+            return 2;
         }
         auto probes = mergeProbes(collectCsvProbes(sim, AnalysisType::OP),
                                   collectPlotProbes(sim, AnalysisType::OP));
-        {
-            ScopedTimer timer(timings, "op_csv_filter");
-            bool ok = filterCsv(raw, finalCsv, probes);
-            if (!ok) return 3;
-        }
+        bool ok = filterCsv(raw, finalCsv, probes);
+        if (!ok) return 3;
     }
 
     // DC sweep 未实现
@@ -441,26 +401,22 @@ int Runner::run(const std::string& netlistPath) {
 
     auto runTranTask = [&]() -> int {
         if (!sim.tran.enabled) return 0;
-        std::cout << "[TRAN] Running transient (TR)\n";
+        if (sim.verbose) {
+            std::cout << "[TRAN] Running transient (TR)\n";
+        }
         std::string raw = rawPath("tran");
         std::string finalCsv = csvPath("tran");
         try {
-            TransientAnalysis tran(ckt, sim, raw, profilingEnabled() ? &timings : nullptr);
-            {
-                ScopedTimer timer(timings, "tran_run");
-                tran.runTrapezoidal();
-            }
+            TransientAnalysis tran(ckt, sim, raw);
+            tran.runTrapezoidal();
         } catch (const std::exception& e) {
             std::cerr << "[TRAN] Exception: " << e.what() << "\n";
             return 4;
         }
         auto plotProbes = collectPlotProbes(sim, AnalysisType::TRAN);
         auto probes = mergeProbes(collectCsvProbes(sim, AnalysisType::TRAN), plotProbes);
-        {
-            ScopedTimer timer(timings, "tran_csv_filter");
-            bool ok = filterCsv(raw, finalCsv, probes);
-            if (!ok) return 5;
-        }
+        bool ok = filterCsv(raw, finalCsv, probes);
+        if (!ok) return 5;
 
         std::vector<std::string> plotCols;
         auto header = readHeader(finalCsv);
@@ -475,28 +431,23 @@ int Runner::run(const std::string& netlistPath) {
         }
         if (!plotCols.empty() && sim.enablePlot) {
             std::string pngPath = (std::filesystem::path(outDir) / (caseStem.string() + "_tran_probe.png")).string();
-            {
-                ScopedTimer timer(timings, "tran_plot");
-                runPythonPlot(finalCsv, plotCols, pngPath);
-            }
+            runPythonPlot(finalCsv, plotCols, pngPath);
         }
         return 0;
     };
 
     auto runHbTask = [&]() -> int {
         if (!sim.hb.enabled) return 0;
-        std::cout << "[HB] Running harmonic balance\n";
+        if (sim.verbose) {
+            std::cout << "[HB] Running harmonic balance\n";
+        }
         std::string raw = rawPath("hb");
         std::string finalCsv = csvPath("hb");
         try {
             const Eigen::VectorXd& xdc = ensureOp();
-            HbAnalysis hb(ckt, sim, xdc, profilingEnabled() ? &timings : nullptr);
+            HbAnalysis hb(ckt, sim, xdc);
             Eigen::VectorXd xhb;
-            bool ok = false;
-            {
-                ScopedTimer timer(timings, "hb_run");
-                ok = hb.run(xhb, raw);
-            }
+            bool ok = hb.run(xhb, raw);
             if (!ok) {
                 std::cerr << "[HB] Convergence failed.\n";
                 return 6;
@@ -507,11 +458,8 @@ int Runner::run(const std::string& netlistPath) {
         }
         auto plotProbes = collectPlotProbes(sim, AnalysisType::HB);
         auto probes = mergeProbes(collectCsvProbes(sim, AnalysisType::HB), plotProbes);
-        {
-            ScopedTimer timer(timings, "hb_csv_filter");
-            bool ok = filterCsv(raw, finalCsv, probes);
-            if (!ok) return 8;
-        }
+        bool ok = filterCsv(raw, finalCsv, probes);
+        if (!ok) return 8;
 
         std::vector<std::string> plotCols;
         auto header = readHeader(finalCsv);
@@ -526,10 +474,7 @@ int Runner::run(const std::string& netlistPath) {
         }
         if (!plotCols.empty() && sim.enablePlot) {
             std::string pngPath = (std::filesystem::path(outDir) / (caseStem.string() + "_hb_probe.png")).string();
-            {
-                ScopedTimer timer(timings, "hb_plot");
-                runPythonPlot(finalCsv, plotCols, pngPath);
-            }
+            runPythonPlot(finalCsv, plotCols, pngPath);
         }
         return 0;
     };
@@ -550,6 +495,8 @@ int Runner::run(const std::string& netlistPath) {
         std::cerr << "[AC] AC analysis not implemented; skipped.\n";
     }
 
-    std::cout << "All requested analyses finished. Outputs in " << outDir << "\n";
+    if (sim.verbose) {
+        std::cout << "All requested analyses finished. Outputs in " << outDir << "\n";
+    }
     return 0;
 }

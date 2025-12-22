@@ -389,12 +389,14 @@ void runPssShootingAnalysis(const Circuit& ckt,
         return;
     }
 
-    std::cout << "PSS-SHOOT: Shooting Method Analysis\n";
-    std::cout << "  Period T = " << std::scientific << cfg.periodT << "\n";
-    std::cout << "  dt       = " << dt << "\n";
-    std::cout << "  maxIters = " << cfg.maxIters
-              << ", tol = " << cfg.tol
-              << ", relax = " << cfg.relax << "\n";
+    if (sim.verbose) {
+        std::cout << "PSS-SHOOT: Shooting Method Analysis\n";
+        std::cout << "  Period T = " << std::scientific << cfg.periodT << "\n";
+        std::cout << "  dt       = " << dt << "\n";
+        std::cout << "  maxIters = " << cfg.maxIters
+                  << ", tol = " << cfg.tol
+                  << ", relax = " << cfg.relax << "\n";
+    }
 
     VectorXd xInit = x0;
 
@@ -416,8 +418,10 @@ void runPssShootingAnalysis(const Circuit& ckt,
         // 残差 F = xT - xInit
         VectorXd F = xT - xInit;
         double err = F.norm();
-        std::cout << "[PSS-SHOOT] Iter " << it
-                  << "  ||x(T) - x(0)|| = " << std::scientific << err << "\n";
+        if (sim.verbose) {
+            std::cout << "[PSS-SHOOT] Iter " << it
+                      << "  ||x(T) - x(0)|| = " << std::scientific << err << "\n";
+        }
 
         if (!std::isfinite(err)) {
             std::cerr << "PSS-SHOOT: non-finite residual, abort.\n";
@@ -425,7 +429,9 @@ void runPssShootingAnalysis(const Circuit& ckt,
         }
 
         if (err < cfg.tol) {
-            std::cout << "PSS-SHOOT: converged after " << it << " iterations.\n";
+            if (sim.verbose) {
+                std::cout << "PSS-SHOOT: converged after " << it << " iterations.\n";
+            }
             break;
         }
 
@@ -537,5 +543,7 @@ void runPssShootingAnalysis(const Circuit& ckt,
         return;
     }
 
-    std::cout << "PSS-SHOOT: results written to " << outFile << "\n";
+    if (sim.verbose) {
+        std::cout << "PSS-SHOOT: results written to " << outFile << "\n";
+    }
 }

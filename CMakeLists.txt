@@ -50,11 +50,6 @@ if(CSIM_FAST_MATH)
   )
 endif()
 
-option(CSIM_ENABLE_PROF "Enable lightweight profiling timers" OFF)
-if(CSIM_ENABLE_PROF)
-  target_compile_definitions(CircuitSimulator PRIVATE ENABLE_PROF)
-endif()
-
 # 将 include 文件夹加入头文件搜索路径
 target_include_directories(${PROJECT_NAME}
     PRIVATE
