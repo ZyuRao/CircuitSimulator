@@ -26,4 +26,4 @@ C3 118 0 1e-12
 .hb 10e6 50
 
 .PROBE hb V(107)
-.PROBE tran V(117)
+.PROBE tran V(107)

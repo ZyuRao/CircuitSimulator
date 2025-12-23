@@ -270,18 +270,53 @@ bool runPythonPlot(const std::string& csvPath,
                    const std::vector<std::string>& columns,
                    const std::string& outPng) {
     if (columns.empty()) return true;
-    std::ostringstream cmd;
-    cmd << "python3 plot_tran.py '" << csvPath << "'";
+    
+    // 构建Python命令参数列表（避免命令行字符串拼接）
+    std::vector<std::string> args;
+    args.push_back("plot_tran.py");
+    args.push_back(csvPath);
+    
     for (const auto& c : columns) {
-        cmd << " '" << c << "'";
+        args.push_back(c);
     }
+    
     if (!outPng.empty()) {
-        cmd << " --out='" << outPng << "'";
+        args.push_back("--out");
+        args.push_back(outPng);
     }
-    cmd << " > /dev/null";
-    int rc = std::system(cmd.str().c_str());
+    
+    // 使用更可靠的方式执行Python
+    std::string command;
+#ifdef _WIN32
+    command = "python";
+#else
+    command = "python3";
+#endif
+    
+    // 构建完整的命令行
+    std::ostringstream fullCmd;
+    fullCmd << command;
+    for (const auto& arg : args) {
+        fullCmd << " \"" << arg << "\"";
+    }
+    
+    // 在Windows上不重定向输出，以便看到错误信息
+#ifndef _WIN32
+    fullCmd << " > /dev/null 2>&1";
+#endif
+    
+    std::cout << "Executing: " << fullCmd.str() << std::endl;
+    
+    int rc = std::system(fullCmd.str().c_str());
     if (rc != 0) {
-        std::cerr << "Plot script failed for " << csvPath << " (code " << rc << ")\n";
+        std::cerr << "Plot script failed with code: " << rc << std::endl;
+        
+        // 检查文件是否存在
+        if (!std::filesystem::exists(csvPath)) {
+            std::cerr << "CSV file does not exist: " << csvPath << std::endl;
+        } else {
+            std::cerr << "CSV file exists, size: " << std::filesystem::file_size(csvPath) << " bytes" << std::endl;
+        }
         return false;
     }
     return true;
