@@ -481,8 +481,8 @@ void MosfetBase::stampAC(Eigen::MatrixXcd& Y, Eigen::VectorXcd& J,
 
     stampCap(eqG, eqS, Cgs);
     stampCap(eqG, eqD, Cgd);
-    stampCap(eqS, eqB, Csb);
-    stampCap(eqD, eqB, Cdb);
+    stampCap(eqS, -1, Csb);
+    stampCap(eqD, -1, Cdb);
 }
 
 void MosfetBase::evalIdsGmGds(
