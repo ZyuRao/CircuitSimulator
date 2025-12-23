@@ -25,6 +25,7 @@ std::string analysisTag(AnalysisType a) {
         case AnalysisType::AC:   return "ac";
         case AnalysisType::TRAN: return "tran";
         case AnalysisType::HB:   return "hb";
+        case AnalysisType::PSS:  return "pss";
         default: return "unknown";
     }
 }
@@ -514,6 +515,59 @@ int Runner::run(const std::string& netlistPath) {
         return 0;
     };
 
+    auto runPssTask = [&]() -> int {
+        if (!sim.pss.enabled) return 0;
+        if (sim.verbose) {
+            std::cout << "[PSS] Running shooting periodic steady state\n";
+        }
+        
+        std::string raw = rawPath("pss");
+        std::string finalCsv = csvPath("pss");
+        
+        try {
+            // 调用shooting分析函数
+            ShootingPssConfig cfg;
+            cfg.periodT = sim.pss.periodT;
+            cfg.tstep = sim.pss.tstep;
+            cfg.maxIters = 50;    // 可以配置化
+            cfg.tol = 1e-6;       // 可以配置化
+            cfg.relax = 0.5;      // 可以配置化
+            
+            runPssShootingAnalysis(ckt, sim, cfg, raw);
+        } catch (const std::exception& e) {
+            std::cerr << "[PSS] Exception: " << e.what() << "\n";
+            return 9;
+        }
+        
+        // 处理输出CSV，类似于TRAN和HB
+        auto plotProbes = collectPlotProbes(sim, AnalysisType::PSS);
+        auto probes = mergeProbes(collectCsvProbes(sim, AnalysisType::PSS), plotProbes);
+        bool ok = filterCsv(raw, finalCsv, probes);
+        if (!ok) return 10;
+        
+        // 绘图处理
+        std::vector<std::string> plotCols;
+        auto header = readHeader(finalCsv);
+        std::unordered_set<std::string> avail(header.begin(), header.end());
+        for (const auto& p : plotProbes) {
+            std::string name = probeHeaderName(p);
+            if (avail.count(name)) {
+                plotCols.push_back(name);
+            } else {
+                std::cerr << "[PSS] Probe column not in CSV: " << name << "\n";
+            }
+        }
+        if (!plotCols.empty() && sim.enablePlot) {
+            std::string pngPath = (std::filesystem::path(outDir) / (caseStem.string() + "_pss_probe.png")).string();
+            runPythonPlot(finalCsv, plotCols, pngPath);
+        }
+        return 0;
+    };
+
+
+    if (sim.pss.enabled) {
+        tasks.push_back(std::async(std::launch::async, runPssTask));
+    }
     if (sim.tran.enabled) {
         tasks.push_back(std::async(std::launch::async, runTranTask));
     }

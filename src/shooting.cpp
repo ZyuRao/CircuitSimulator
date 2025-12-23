@@ -13,6 +13,10 @@
 #include <unordered_map>
 #include <cmath>
 #include <functional>
+#include <stdexcept>
+#include <string>
+#include <algorithm>
+
 
 using Eigen::MatrixXd;
 using Eigen::VectorXd;
@@ -129,6 +133,175 @@ struct MosCapState {
     double vdbPrev = 0.0;
 };
 
+static bool solveOneStepBE(const Circuit& ckt,
+                           const SimulationConfig& sim,
+                           double tNow, double dt,
+                           VectorXd& x, // in: x_n (as initial guess), out: x_{n+1}
+                           const std::unordered_map<const CapacitorElement*, double>& capVprev,
+                           const std::unordered_map<const Inductor*, double>& indIprev,
+                           const std::unordered_map<const MosfetBase*, MosCapState>& mosPrev,
+                           MatrixXd& outA)
+{
+    (void)sim;
+    const int N = ckt.numUnknowns();
+    const int maxNewtonIters = 50;
+    const double tol = 1e-7;
+    const double damp = 1.0; // 不稳就改成 0.5~0.9
+
+    MatrixXd G(N, N);
+    VectorXd I(N);
+
+    // gmin continuation inside one step
+    const int maxGminTries = 6;
+    double gmin = 1e-12;
+
+    for (int gtry = 0; gtry < maxGminTries; ++gtry) {
+        VectorXd xk = x;
+
+        bool converged = false;
+        for (int iter = 0; iter < maxNewtonIters; ++iter) {
+            G.setZero();
+            I.setZero();
+
+            AnalysisContext ctx;
+            ctx.type = AnalysisType::TRAN;
+            ctx.time = tNow; // backward-euler at t_{n+1}
+
+            // 1) static elements: R, independent sources, etc.
+            for (const auto& e : ckt.elements) {
+                if (std::dynamic_pointer_cast<CapacitorElement>(e)) continue;
+                if (std::dynamic_pointer_cast<Inductor>(e)) continue;
+                if (std::dynamic_pointer_cast<MosfetBase>(e)) continue;
+                e->stamp(G, I, ckt, xk, ctx);
+            }
+
+            // 2) MOS conduction (Newton linearization)
+            for (const auto& e : ckt.elements) {
+                auto m = std::dynamic_pointer_cast<MosfetBase>(e);
+                if (!m) continue;
+                m->stamp(G, I, ckt, xk, ctx);
+            }
+
+            // 3) BE dynamic stamps (caps / inductors / MOS caps) using HISTORY from x_n
+            for (const auto& e : ckt.elements) {
+                if (auto c = std::dynamic_pointer_cast<CapacitorElement>(e)) {
+                    const auto& nodes = c->getNodeIds();
+                    const int eq1 = ckt.nodes[nodes[0]].eqIndex;
+                    const int eq2 = ckt.nodes[nodes[1]].eqIndex;
+                    const double vPrev = capVprev.at(c.get());
+                    pssStampCapBE(eq1, eq2, c->getC(), dt, vPrev, G, I);
+                } else if (auto L = std::dynamic_pointer_cast<Inductor>(e)) {
+                    const auto& nodes = L->getNodeIds();
+                    const int eqP = ckt.nodes[nodes[0]].eqIndex;
+                    const int eqM = ckt.nodes[nodes[1]].eqIndex;
+                    const int k = L->getBranchEqIndex();
+                    if (k < 0 || k >= N) continue;
+                    const double iPrev = indIprev.at(L.get());
+                    pssStampIndBE(eqP, eqM, k, L->getL(), dt, iPrev, G, I);
+                } else if (auto m = std::dynamic_pointer_cast<MosfetBase>(e)) {
+                    const auto& nodes = m->getNodeIds();
+                    const int eqD = ckt.nodes[nodes[0]].eqIndex;
+                    const int eqG = ckt.nodes[nodes[1]].eqIndex;
+                    const int eqS = ckt.nodes[nodes[2]].eqIndex;
+                    const int eqB = ckt.nodes[(nodes.size() > 3) ? nodes[3] : nodes[2]].eqIndex;
+
+                    const MosCapState& st = mosPrev.at(m.get());
+                    const double Cj0 = m->getCj0();
+                    const double Cg0 = m->getCg0();
+
+                    pssStampCapBE(eqG, eqS, Cg0, dt, st.vgsPrev, G, I); // Cgs
+                    pssStampCapBE(eqG, eqD, Cg0, dt, st.vgdPrev, G, I); // Cgd
+                    pssStampCapBE(eqS, eqB, Cj0, dt, st.vsbPrev, G, I); // Csb
+                    pssStampCapBE(eqD, eqB, Cj0, dt, st.vdbPrev, G, I); // Cdb
+                }
+            }
+
+            stampGlobalGmin(ckt, G, gmin);
+
+            // Solve the linearized system
+            VectorXd xsol = Solver::solveLinearSystemLU(G, I);
+            if (!xsol.allFinite()) {
+                converged = false;
+                break;
+            }
+
+            VectorXd xnew = xk + damp * (xsol - xk);
+            double stepNorm = (xnew - xk).norm();
+            xk.swap(xnew);
+
+            if (stepNorm < tol * (1.0 + xk.norm())) {
+                converged = true;
+                break;
+            }
+        }
+
+        if (converged) {
+            // Re-stamp one more time at the final x to get accurate Jacobian A
+            G.setZero();
+            I.setZero();
+
+            AnalysisContext ctx;
+            ctx.type = AnalysisType::TRAN;
+            ctx.time = tNow;
+
+            for (const auto& e : ckt.elements) {
+                if (std::dynamic_pointer_cast<CapacitorElement>(e)) continue;
+                if (std::dynamic_pointer_cast<Inductor>(e)) continue;
+                if (std::dynamic_pointer_cast<MosfetBase>(e)) continue;
+                e->stamp(G, I, ckt, xk, ctx);
+            }
+            for (const auto& e : ckt.elements) {
+                auto m = std::dynamic_pointer_cast<MosfetBase>(e);
+                if (!m) continue;
+                m->stamp(G, I, ckt, xk, ctx);
+            }
+            for (const auto& e : ckt.elements) {
+                if (auto c = std::dynamic_pointer_cast<CapacitorElement>(e)) {
+                    const auto& nodes = c->getNodeIds();
+                    const int eq1 = ckt.nodes[nodes[0]].eqIndex;
+                    const int eq2 = ckt.nodes[nodes[1]].eqIndex;
+                    const double vPrev = capVprev.at(c.get());
+                    pssStampCapBE(eq1, eq2, c->getC(), dt, vPrev, G, I);
+                } else if (auto L = std::dynamic_pointer_cast<Inductor>(e)) {
+                    const auto& nodes = L->getNodeIds();
+                    const int eqP = ckt.nodes[nodes[0]].eqIndex;
+                    const int eqM = ckt.nodes[nodes[1]].eqIndex;
+                    const int k = L->getBranchEqIndex();
+                    if (k < 0 || k >= N) continue;
+                    const double iPrev = indIprev.at(L.get());
+                    pssStampIndBE(eqP, eqM, k, L->getL(), dt, iPrev, G, I);
+                } else if (auto m = std::dynamic_pointer_cast<MosfetBase>(e)) {
+                    const auto& nodes = m->getNodeIds();
+                    const int eqD = ckt.nodes[nodes[0]].eqIndex;
+                    const int eqG = ckt.nodes[nodes[1]].eqIndex;
+                    const int eqS = ckt.nodes[nodes[2]].eqIndex;
+                    const int eqB = ckt.nodes[(nodes.size() > 3) ? nodes[3] : nodes[2]].eqIndex;
+
+                    const MosCapState& st = mosPrev.at(m.get());
+                    const double Cj0 = m->getCj0();
+                    const double Cg0 = m->getCg0();
+
+                    pssStampCapBE(eqG, eqS, Cg0, dt, st.vgsPrev, G, I);
+                    pssStampCapBE(eqG, eqD, Cg0, dt, st.vgdPrev, G, I);
+                    pssStampCapBE(eqS, eqB, Cj0, dt, st.vsbPrev, G, I);
+                    pssStampCapBE(eqD, eqB, Cj0, dt, st.vdbPrev, G, I);
+                }
+            }
+
+            stampGlobalGmin(ckt, G, gmin);
+
+            x = xk;
+            outA = G;
+            return true;
+        }
+
+        gmin *= 10.0;
+    }
+
+    return false;
+}
+
+
 // =======================================================================
 // 积分一个周期，并可选地计算 Monodromy 矩阵 (Sensitivity Analysis)
 // =======================================================================
@@ -136,18 +309,17 @@ VectorXd integrateOnePeriodPssBE(const Circuit& ckt,
                                  const SimulationConfig& sim,
                                  double dt, double T,
                                  const VectorXd& x0,
-                                 MatrixXd* outMonodromy, // 如果非空，则计算灵敏度
+                                 MatrixXd* outMonodromy,
                                  const std::function<void(double, const VectorXd&)>& dumpRow)
 {
     const int N = ckt.numUnknowns();
-    double stepsDouble = T / dt;
-    int nSteps = (int)std::floor(stepsDouble + 1e-12);
-    
-    // 1. 初始化历史状态
+    VectorXd x = x0;
+
+    // Collect element lists and init history from x0
     std::vector<std::shared_ptr<CapacitorElement>> caps;
     std::vector<std::shared_ptr<Inductor>> inds;
     std::vector<std::shared_ptr<MosfetBase>> mosfets;
-    
+
     for (const auto& e : ckt.elements) {
         if (auto c = std::dynamic_pointer_cast<CapacitorElement>(e)) caps.push_back(c);
         else if (auto L = std::dynamic_pointer_cast<Inductor>(e)) inds.push_back(L);
@@ -155,172 +327,96 @@ VectorXd integrateOnePeriodPssBE(const Circuit& ckt,
     }
 
     std::unordered_map<const CapacitorElement*, double> capVprev;
+    capVprev.reserve(caps.size());
     for (auto& c : caps) {
         const auto& nodes = c->getNodeIds();
         capVprev[c.get()] = getNodeVoltage(ckt, x0, nodes[0]) - getNodeVoltage(ckt, x0, nodes[1]);
     }
 
     std::unordered_map<const Inductor*, double> indIprev;
+    indIprev.reserve(inds.size());
     for (auto& L : inds) {
-        int k = L->getBranchEqIndex();
+        const int k = L->getBranchEqIndex();
         indIprev[L.get()] = (k >= 0 && k < x0.size()) ? x0(k) : 0.0;
     }
 
     std::unordered_map<const MosfetBase*, MosCapState> mosPrev;
+    mosPrev.reserve(mosfets.size());
     for (auto& m : mosfets) {
         const auto& nodes = m->getNodeIds();
-        double vD = getNodeVoltage(ckt, x0, nodes[0]);
-        double vG = getNodeVoltage(ckt, x0, nodes[1]);
-        double vS = getNodeVoltage(ckt, x0, nodes[2]);
-        double vB = getNodeVoltage(ckt, x0, (nodes.size()>3 ? nodes[3] : nodes[2]));
-        mosPrev[m.get()] = {vG - vS, vG - vD, vS - vB, vD - vB};
+        const double vD = getNodeVoltage(ckt, x0, nodes[0]);
+        const double vG = getNodeVoltage(ckt, x0, nodes[1]);
+        const double vS = getNodeVoltage(ckt, x0, nodes[2]);
+        const double vB = getNodeVoltage(ckt, x0, (nodes.size() > 3) ? nodes[3] : nodes[2]);
+        MosCapState st;
+        st.vgsPrev = vG - vS;
+        st.vgdPrev = vG - vD;
+        st.vsbPrev = vS - vB;
+        st.vdbPrev = vD - vB;
+        mosPrev[m.get()] = st;
     }
 
-    VectorXd x = x0;
-    MatrixXd G(N, N);
-    VectorXd I(N);
-    MatrixXd B(N, N); // 用于灵敏度分析的 RHS 矩阵 (C/dt)
-
-    // 初始化灵敏度矩阵 S 为单位阵 (S_0 = I)
     MatrixXd S;
-    if (outMonodromy) {
-        S = MatrixXd::Identity(N, N);
-    }
+    if (outMonodromy) S = MatrixXd::Identity(N, N);
 
-    const int maxNewtonIters = 50;
-    const double tol = 1e-6;
-    double gmin = 1e-9;
-    
     if (dumpRow) dumpRow(0.0, x);
 
-    // === 时间步循环 ===
-    for (int step = 0; step < nSteps; ++step) {
-        double tNow = (step + 1) * dt;
-        
-        // --- 1. Newton 求解当前步 x_new ---
-        // 为了确保灵敏度矩阵准确，这里不使用激进的 damp，而是标准 Newton
-        // 或者保留原有的 damped 逻辑，但收敛后 G 必须是准确的 Jacobian
-        
-        for (int iter = 0; iter < maxNewtonIters; ++iter) {
-            G.setZero();
-            I.setZero();
-            
-            AnalysisContext ctx;
-            ctx.type = AnalysisType::TRAN;
-            ctx.time = tNow;
-            
-            // Stamp 静态元件
-            for (const auto& e : ckt.elements) {
-                if (!std::dynamic_pointer_cast<CapacitorElement>(e) && 
-                    !std::dynamic_pointer_cast<Inductor>(e) &&
-                    !std::dynamic_pointer_cast<MosfetBase>(e)) {
-                    e->stamp(G, I, ckt, x, ctx);
-                }
-            }
-            // Stamp MOS 导电
-            for (const auto& m : mosfets) m->stamp(G, I, ckt, x, ctx);
-            
-            // Stamp 动态元件 (Cap/Ind/MosCap)
-            for (const auto& c : caps) {
-                double vPrev = capVprev[c.get()];
-                const auto& nodes = c->getNodeIds();
-                pssStampCapBE(ckt.nodes[nodes[0]].eqIndex, ckt.nodes[nodes[1]].eqIndex, 
-                              c->getC(), dt, vPrev, G, I);
-            }
-            for (const auto& L : inds) {
-                double iPrev = indIprev[L.get()];
-                const auto& nodes = L->getNodeIds();
-                pssStampIndBE(ckt.nodes[nodes[0]].eqIndex, ckt.nodes[nodes[1]].eqIndex,
-                              L->getBranchEqIndex(), L->getL(), dt, iPrev, G, I);
-            }
-            for (const auto& m : mosfets) {
-                const auto& st = mosPrev[m.get()];
-                const auto& nodes = m->getNodeIds();
-                int eqD = ckt.nodes[nodes[0]].eqIndex;
-                int eqG = ckt.nodes[nodes[1]].eqIndex;
-                int eqS = ckt.nodes[nodes[2]].eqIndex;
-                int eqB = ckt.nodes[(nodes.size()>3?nodes[3]:nodes[2])].eqIndex;
-                
-                double Cj0 = m->getCj0(), Cg0 = m->getCg0();
-                pssStampCapBE(eqG, eqS, Cg0, dt, st.vgsPrev, G, I);
-                pssStampCapBE(eqG, eqD, Cg0, dt, st.vgdPrev, G, I);
-                pssStampCapBE(eqS, eqB, Cj0, dt, st.vsbPrev, G, I);
-                pssStampCapBE(eqD, eqB, Cj0, dt, st.vdbPrev, G, I);
-            }
+    double t = 0.0;
+    const double eps = 1e-15;
 
-            stampGlobalGmin(ckt, G, gmin);
+    while (t < T - eps) {
+        const double dtTry = std::min(dt, T - t);
+        const double tNext = t + dtTry;
 
-            VectorXd dx = Solver::solveLinearSystemLU(G, I); // I 是残差 (G*x_old - I_src) ? 
-            // 注意：Element stamp 约定 I向量存的是源项。Solver 需要解 G*x = I。
-            // 实际上这里的 G 已经是 Jacobian 吗？
-            // 原有的 element.cpp stamp 是直接填充 G 和 RHS I。
-            // 对于非线性器件，G 是线性化 conductance。
-            // 所以 solve 出来的是 x_new，而不是 dx。
-            // Newton Update: x_new = G^-1 * I
-            
-            if (!dx.allFinite()) {
-                gmin *= 10; continue;
-            }
-
-            VectorXd xOld = x;
-            x = x + 0.8 * (dx - x); // 简单阻尼
-            
-            if ((x - xOld).norm() < tol) break;
+        // 1) Solve x_{n+1} and get step Jacobian A
+        MatrixXd A(N, N);
+        VectorXd xGuess = x;
+        bool ok = solveOneStepBE(ckt, sim, tNext, dtTry, xGuess, capVprev, indIprev, mosPrev, A);
+        if (!ok) {
+            throw std::runtime_error("PSS shooting: BE step Newton failed (t=" + std::to_string(tNext) + ")");
         }
+        x = xGuess;
 
-        // --- 2. 灵敏度传递 (Sensitivity Transfer) ---
+        // 2) Sensitivity recursion:  A * S_{n+1} = B * S_n
         if (outMonodromy) {
-            // 方程: d/dt(q(x)) + f(x) = u(t)
-            // BE:   (q(x_n) - q(x_{n-1}))/h + f(x_n) = u_n
-            // Diff w.r.t x_0:
-            //       (1/h * C_n + G_n) * S_n = (1/h * C_n) * S_{n-1}
-            // LHS 矩阵 (1/h*C + G) 正是刚刚收敛时的 G (Newton Jacobian)
-            // RHS 矩阵需要重新组装只包含 C/h 的部分
-            
-            B.setZero();
-            stampDynamicMatrix(ckt, B, dt);
-            
-            // 计算 RHS: B * S_{n-1}
+            MatrixXd B = MatrixXd::Zero(N, N);
+            stampDynamicMatrix(ckt, B, dtTry);
+
             MatrixXd RHS = B * S;
-            
-            // 解线性方程: G * S_n = RHS
-            // 注意：这里 G 必须是最后一次迭代收敛时的 Jacobian。
-            // 此时 G 已经包含了 stampDynamicMatrix 的内容(作为 LHS)。
-            
-            // 使用 LU 分解求解多右端项
-            // 自行实现或调用 solver (Solver::solveLinearSystemLU 通常只解 Vector)
-            // 这里为了简单，按列求解
-            for (int col = 0; col < N; ++col) {
-                VectorXd rhsVec = RHS.col(col);
-                VectorXd sCol = Solver::solveLinearSystemLU(G, rhsVec);
-                S.col(col) = sCol;
-            }
+
+            // Factorize A once and solve for all RHS columns
+            Eigen::PartialPivLU<MatrixXd> lu(A);
+            S = lu.solve(RHS);
         }
 
-        // --- 3. 更新历史状态 ---
-        for (const auto& c : caps) {
+        // 3) Update history using x (as x_n for next step)
+        for (auto& c : caps) {
             const auto& nodes = c->getNodeIds();
             capVprev[c.get()] = getNodeVoltage(ckt, x, nodes[0]) - getNodeVoltage(ckt, x, nodes[1]);
         }
-        for (const auto& L : inds) {
-            int k = L->getBranchEqIndex();
-            indIprev[L.get()] = (k>=0 && k<x.size()) ? x(k) : 0.0;
+        for (auto& L : inds) {
+            const int k = L->getBranchEqIndex();
+            indIprev[L.get()] = (k >= 0 && k < x.size()) ? x(k) : 0.0;
         }
-        for (const auto& m : mosfets) {
+        for (auto& m : mosfets) {
             const auto& nodes = m->getNodeIds();
-            double vD = getNodeVoltage(ckt, x, nodes[0]);
-            double vG = getNodeVoltage(ckt, x, nodes[1]);
-            double vS = getNodeVoltage(ckt, x, nodes[2]);
-            double vB = getNodeVoltage(ckt, x, (nodes.size()>3?nodes[3]:nodes[2]));
-            mosPrev[m.get()] = {vG-vS, vG-vD, vS-vB, vD-vB};
+            const double vD = getNodeVoltage(ckt, x, nodes[0]);
+            const double vG = getNodeVoltage(ckt, x, nodes[1]);
+            const double vS = getNodeVoltage(ckt, x, nodes[2]);
+            const double vB = getNodeVoltage(ckt, x, (nodes.size() > 3) ? nodes[3] : nodes[2]);
+            MosCapState st;
+            st.vgsPrev = vG - vS;
+            st.vgdPrev = vG - vD;
+            st.vsbPrev = vS - vB;
+            st.vdbPrev = vD - vB;
+            mosPrev[m.get()] = st;
         }
-        
-        if (dumpRow) dumpRow(tNow, x);
+
+        if (dumpRow) dumpRow(tNext, x);
+        t = tNext;
     }
 
-    if (outMonodromy) {
-        *outMonodromy = S;
-    }
+    if (outMonodromy) *outMonodromy = S;
     return x;
 }
 
@@ -333,120 +429,113 @@ void runPssShootingAnalysis(const Circuit& ckt,
                             const std::string& outFile)
 {
     if (cfg.periodT <= 0.0) return;
-    double dt = (cfg.tstep <= 0.0) ? cfg.periodT / 200.0 : cfg.tstep;
-    int N = ckt.numUnknowns();
+
+    const double T = cfg.periodT;
+    const double dt = (cfg.tstep > 0.0) ? cfg.tstep : (T / 400.0);
+
+    const int N = ckt.numUnknowns();
     if (N <= 0) return;
 
-    // 1. DC 初始化
+    // 1) DC init
     DcAnalysis dc(ckt, sim, DcSolverKind::GaussSeidel);
-    VectorXd x0 = dc.run();
-    
-    std::cout << "PSS-SHOOT: Sensitivity + Broyden Method\n"
-              << "  Period=" << cfg.periodT << ", dt=" << dt << "\n";
+    VectorXd xInit = dc.run();
+    if (sim.verbose) {
+    std::cout << "PSS-SHOOT (Sensitivity Matrix / Monodromy)\n"
+              << "  Period T = " << T << "\n"
+              << "  dt       = " << dt << "\n"
+              << "  N        = " << N << "\n";
+    }
+    const int maxIters = std::max(1, cfg.maxIters);
+    const double tol = std::max(1e-14, cfg.tol);
 
-    VectorXd xInit = x0;
-    MatrixXd J_shoot(N, N); // Shooting 雅可比矩阵 M - I
-    VectorXd F_curr, F_prev;
-    VectorXd dx_prev;
-    
-    bool useBroyden = false;
+    // Outer Newton on H(x0) = x(T;x0) - x0
+    for (int it = 0; it < maxIters; ++it) {
+        MatrixXd M(N, N);
+        VectorXd xT = integrateOnePeriodPssBE(ckt, sim, dt, T, xInit, &M, nullptr);
 
-    for (int iter = 0; iter < cfg.maxIters; ++iter) {
-        VectorXd xT;
-        MatrixXd M; // Monodromy Matrix
-        
-        // 策略: 
-        // 第一次迭代 (iter=0) 或 Broyden 失败重启时，计算精确灵敏度
-        // 其他时候只积分，不计算灵敏度，用 Broyden 更新 J_shoot
-        bool computeSens = (!useBroyden);
-
-        try {
-            xT = integrateOnePeriodPssBE(ckt, sim, dt, cfg.periodT, xInit, 
-                                         computeSens ? &M : nullptr, nullptr);
-        } catch (const std::exception& e) {
-            std::cerr << "Integration failed: " << e.what() << "\n";
-            return;
-        }
-
-        // 残差 F(x) = x(T) - x(0)
-        F_curr = xT - xInit;
-        double err = F_curr.norm();
-        std::cout << "Iter " << iter << " ||F|| = " << std::scientific << err << "\n";
-
-        if (err < cfg.tol) {
-            std::cout << "Converged.\n";
-            break;
-        }
-
-        // --- Jacobian Update ---
-        if (computeSens) {
-            // 使用精确的 Monodromy 矩阵
-            // J_shoot = M - I
-            J_shoot = M - MatrixXd::Identity(N, N);
-            
-            // 下次尝试使用 Broyden 以加速
-            useBroyden = true;
-        } else {
-            // Broyden Update (Rank-1 update)
-            // J_k = J_{k-1} + (dF - J_{k-1}*dx) * dx^T / (dx^T * dx)
-            // dF = F_curr - F_prev
-            // dx = dx_prev (即 xInit_curr - xInit_prev)
-            
-            VectorXd dF = F_curr - F_prev;
-            VectorXd Jdx = J_shoot * dx_prev;
-            double dxNorm2 = dx_prev.squaredNorm();
-            
-            if (dxNorm2 > 1e-20) {
-                J_shoot += (dF - Jdx) * dx_prev.transpose() / dxNorm2;
-            } else {
-                // 如果步长太小，重置为灵敏度分析
-                useBroyden = false;
-                std::cout << "  (Broyden step too small, resetting to Sensitivity)\n";
-                // 回退本次迭代，或者仅仅下一次强制计算灵敏度
-                // 这里选择简单策略：继续求解，但标记下一次强制计算
-                // 其实最好现在就重算，但为了代码简单，本次用旧 J 继续
+        VectorXd H = xT - xInit;
+        double hnorm = H.norm();
+        if (sim.verbose) {
+            std::cout << "  Iter " << it << "  ||H|| = " << std::scientific << hnorm << "\n";
+            if (hnorm < tol) {
+                std::cout << "  Converged.\n";
+                break;
             }
         }
+        MatrixXd J = M - MatrixXd::Identity(N, N);
 
-        // --- Newton Step ---
-        // solve J * dx = -F
-        VectorXd dx = Solver::solveLinearSystemLU(J_shoot, -F_curr);
-        
+        // Solve J * dx = -H
+        VectorXd dx = Solver::solveLinearSystemLU(J, -H);
         if (!dx.allFinite()) {
-            std::cout << "  (Linear solve failed, resetting)\n";
-            xInit = x0; // 重置
-            useBroyden = false;
-            continue;
+            throw std::runtime_error("PSS shooting: linear solve failed (Jacobian singular/NaN)");
         }
 
-        // 阻尼更新
-        double alpha = cfg.relax;
-        xInit += alpha * dx;
-        
-        // 保存用于下一次 Broyden 的状态
-        F_prev = F_curr;
-        dx_prev = alpha * dx;
+        // Damping + backtracking (robust)
+        double alpha = (cfg.relax > 0.0 && cfg.relax <= 1.0) ? cfg.relax : 1.0;
+        bool accepted = false;
+
+        for (int ls = 0; ls < 8; ++ls) {
+            VectorXd xTrial = xInit + alpha * dx;
+            VectorXd xT_trial = integrateOnePeriodPssBE(ckt, sim, dt, T, xTrial, nullptr, nullptr);
+            VectorXd H_trial = xT_trial - xTrial;
+            double n_trial = H_trial.norm();
+
+            if (std::isfinite(n_trial) && n_trial < hnorm) {
+                xInit.swap(xTrial);
+                accepted = true;
+                break;
+            }
+            alpha *= 0.5;
+        }
+
+        if (!accepted) {
+            xInit += 1e-2 * dx; // fallback
+        }
     }
 
-    // 最终输出波形
+    // 2) Output one-period waveform
     std::ofstream ofs(outFile);
-    // ... (保留原有的输出代码) ...
-    
-    // Header
+    if (!ofs) {
+        std::cerr << "Cannot open output file: " << outFile << "\n";
+        return;
+    }
+    ofs << std::setprecision(12);
+
+    // Header: time, node voltages, then branch currents (V sources + L)
     ofs << "time";
-    for (const auto& node : ckt.nodes) if (node.eqIndex >= 0) ofs << ",V(" << node.name << ")";
-    // ... Sources/Inductors ...
+    for (const auto& node : ckt.nodes) {
+        if (node.eqIndex >= 0) ofs << ",V(" << node.name << ")";
+    }
+    for (const auto& e : ckt.elements) {
+        if (auto vs = std::dynamic_pointer_cast<VoltageSource>(e)) {
+            ofs << ",I(" << vs->getName() << ")";
+        } else if (auto L = std::dynamic_pointer_cast<Inductor>(e)) {
+            ofs << ",I(" << L->getName() << ")";
+        }
+    }
     ofs << "\n";
 
     auto dumpRow = [&](double t, const VectorXd& x) {
         ofs << t;
-        for (const auto& node : ckt.nodes) 
+        for (const auto& node : ckt.nodes) {
             if (node.eqIndex >= 0 && node.eqIndex < x.size()) ofs << "," << x(node.eqIndex);
-        // ... (其他电流输出逻辑同原文件)
+        }
+        for (const auto& e : ckt.elements) {
+            if (auto vs = std::dynamic_pointer_cast<VoltageSource>(e)) {
+                int k = vs->getBranchEqIndex();
+                double val = (k >= 0 && k < x.size()) ? x(k) : 0.0;
+                ofs << "," << val;
+            } else if (auto L = std::dynamic_pointer_cast<Inductor>(e)) {
+                int k = L->getBranchEqIndex();
+                double val = (k >= 0 && k < x.size()) ? x(k) : 0.0;
+                ofs << "," << val;
+            }
+        }
         ofs << "\n";
     };
 
     dumpRow(0.0, xInit);
-    integrateOnePeriodPssBE(ckt, sim, dt, cfg.periodT, xInit, nullptr, dumpRow);
-    std::cout << "Results written to " << outFile << "\n";
+    integrateOnePeriodPssBE(ckt, sim, dt, T, xInit, nullptr, dumpRow);
+
+    std::cout << "PSS waveform written to: " << outFile << "\n";
 }

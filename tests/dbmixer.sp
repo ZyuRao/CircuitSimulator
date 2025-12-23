@@ -44,6 +44,7 @@ Rs2 113 111 25
 
 .TRAN 1e-13 5e-9
 .hb 100e6 50
+.pss 100e6 1e-11
 .plotnv  102
 .plotnv  103 
 *.plotnv  112 
@@ -53,5 +54,6 @@ Rs2 113 111 25
 
 *.probe hb V(102) V(103) 
 *.probe hb V(102) V(103) V(107)
-.probe tran V(102) V(107)
+.probe tran V(102) V(103)
+.probe pss V(102) V(103)
 .end

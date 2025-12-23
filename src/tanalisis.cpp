@@ -99,7 +99,7 @@ void TransientAnalysis::runBackwardEuler() {
     const double dtInit = cfg.tstep;          // 初始 dt
     double       dt     = dtInit;             // 当前 dt
     const double dtMin  = dtInit / 64.0;      // 最小 dt
-    const double dtMax  = dtInit * 32.0;     // 最大 dt
+    const double dtMax  = std::min(dtInit * 16.0, cfg.tstop / 400);     // 最大 dt
     const double tstop  = cfg.tstop;
     const double tstart = cfg.tstart;
 
@@ -311,31 +311,33 @@ void TransientAnalysis::runBackwardEuler() {
                 stampCapBE(eq1, eq2, Cval, dtTry, vPrev, G, I);
             }
 
-            // 4) 电感 BE Thévenin
+            // 4) 电感 BE v_n+1 = L/dt * i_n+1 - L/dt * i_n
             for (const auto& L : inds) {
                 double Lval = L->getL();
                 if (Lval <= 0.0) continue;
 
                 const auto& nodes = L->getNodeIds();
-                int np = nodes[0];
-                int nm = nodes[1];
+                int np  = nodes[0];
+                int nm  = nodes[1];
                 int eqP = ckt.nodes[np].eqIndex;
                 int eqM = ckt.nodes[nm].eqIndex;
                 int k   = L->getBranchEqIndex();
                 if (k < 0 || k >= N) continue;
 
-                double R_eq   = Lval / dtTry;
-                double iPrev  = indIprev[L.get()];
-                double V_hist = -R_eq * iPrev;
+                double iPrev = indIprev[L.get()];
+                double alpha = dtTry / Lval;   // = 1/R_eq
 
+                // 节点 KCL：不变
                 if (eqP >= 0) G(eqP, k) += 1.0;
                 if (eqM >= 0) G(eqM, k) -= 1.0;
 
-                if (eqP >= 0) G(k, eqP) += 1.0;
-                if (eqM >= 0) G(k, eqM) -= 1.0;
-                G(k, k) += -R_eq;
-                I(k)    += V_hist;
+                // 支路方程（k 行）： alpha*(Vp - Vm) - i_{n+1} = -iPrev
+                if (eqP >= 0) G(k, eqP) += +alpha;
+                if (eqM >= 0) G(k, eqM) += -alpha;
+                G(k, k) += -1.0;
+                I(k)    += -iPrev;
             }
+
 
             // 5) MOS 寄生电容 BE
             for (const auto& m : mosfets) {
@@ -507,15 +509,16 @@ void TransientAnalysis::runBackwardEuler() {
             dtPrev    = dtTry;
 
             // 当前 dt翻倍
-            dt = dt > dtMax ? dt * 2.0 : dtTry * 2.0;
+            dt = dtTry >= 0.5 * dtMax ? dt : dtTry * 2.0;
 
             ++step;
             accepted = true;
         }
     }
-
+    if (sim.verbose) {
     std::cout << "Transient analysis (Backward Euler) finished. "
               << "Results written to '" << outFile << "'.\n";
+    }
 }
 
 // ========= 梯形法瞬态（Trapezoidal Rule） =========
@@ -535,7 +538,7 @@ void TransientAnalysis::runTrapezoidal(){
     const double dtInit = cfg.tstep;      // 初始 dt（来自网表）
     double       dt     = dtInit;         // 当前 dt（只减不增）
     const double dtMin  = dtInit / 64.0;  // 最小 dt
-    const double dtMax  = dtInit * 32.0;
+    const double dtMax  = std::min(dtInit * 16.0, cfg.tstop / 400);     // 最大 dt
     const double tstop  = cfg.tstop;
     const double tstart = cfg.tstart;
 
@@ -608,8 +611,8 @@ void TransientAnalysis::runTrapezoidal(){
 
     // 电感：上一时刻电压/电流
     struct IndTrapState {
-        double vPrev = 0.0;  // V(np)-V(nm) at t^n
-        double iPrev = 0.0;  // I_L at t^n
+        double vPrev = 0.0;
+        double iPrev = 0.0;
     };
     std::unordered_map<const Inductor*, IndTrapState> indState;
     for (auto& L : inds) {
@@ -707,8 +710,9 @@ void TransientAnalysis::runTrapezoidal(){
               << ", tstart="       << tstart << "\n";
 
     int totalStepsInit = static_cast<int>(std::floor(tstop / dtInit + 1e-12));
-    std::cout << "[TRAN-TR] total steps (based on initial dt) = " << totalStepsInit << "\n";
-
+    if (sim.verbose) {
+        std::cout << "[TRAN-TR] total steps (based on initial dt) = " << totalStepsInit << "\n";
+    }
     VectorXd x         = xdc;   // 当前接受解
     VectorXd xPrevStep = xdc;   // 上一个接受解（用于预测）
     double   dtPrev    = dtInit;
@@ -764,30 +768,39 @@ void TransientAnalysis::runTrapezoidal(){
                     stampCapBE(eq1, eq2, Cval, dtTry, st.vPrev, G, I);
                 }
 
+                // i_n+1 = dt/2L * v_n+1 + i_n + dt/2L * v_n
                 for (const auto& L : inds) {
                     double Lval = L->getL();
                     if (Lval <= 0.0) continue;
 
                     const auto& nodes = L->getNodeIds();
-                    int np = nodes[0];
-                    int nm = nodes[1];
+                    int np  = nodes[0];
+                    int nm  = nodes[1];
                     int eqP = ckt.nodes[np].eqIndex;
                     int eqM = ckt.nodes[nm].eqIndex;
                     int k   = L->getBranchEqIndex();
                     if (k < 0 || k >= N) continue;
 
                     const IndTrapState& st = indState[L.get()];
-                    double R_eq   = Lval / dtTry;
-                    double V_hist = -R_eq * st.iPrev;
 
+                    // TR: alpha = dt/(2L)
+                    double alpha = dtTry / (2.0 * Lval);
+
+                    // RHS = i_n + alpha * v_n
+                    double rhs = st.iPrev + alpha * st.vPrev;
+
+                    // 节点 KCL：保持你原来的方向约定（i 从 p -> m）
                     if (eqP >= 0) G(eqP, k) += 1.0;
                     if (eqM >= 0) G(eqM, k) -= 1.0;
 
-                    if (eqP >= 0) G(k, eqP) += 1.0;
-                    if (eqM >= 0) G(k, eqM) -= 1.0;
-                    G(k, k) += -R_eq;
-                    I(k)    += V_hist;
+                    // 支路方程（k 行）： i_{n+1} - alpha*(Vp - Vm) = rhs
+                    if (eqP >= 0) G(k, eqP) += -alpha;
+                    if (eqM >= 0) G(k, eqM) += +alpha;
+                    G(k, k) += 1.0;
+
+                    I(k) += rhs;
                 }
+
 
                 for (const auto& m : mosfets) {
                     const auto& nodes = m->getNodeIds();
@@ -844,17 +857,21 @@ void TransientAnalysis::runTrapezoidal(){
                     if (k < 0 || k >= N) continue;
 
                     const IndTrapState& st = indState[L.get()];
-                    double R_eq   = 2.0 * Lval / dtTry;
-                    double V_hist = -R_eq * st.iPrev - st.vPrev;
+
+                    double alpha = dtTry / (2.0 * Lval);
+
+                    double rhs = st.iPrev + alpha * st.vPrev;
 
                     if (eqP >= 0) G(eqP, k) += 1.0;
                     if (eqM >= 0) G(eqM, k) -= 1.0;
 
-                    if (eqP >= 0) G(k, eqP) += 1.0;
-                    if (eqM >= 0) G(k, eqM) -= 1.0;
-                    G(k, k) += -R_eq;
-                    I(k)    += V_hist;
+                    G(k, k) += 1.0;
+                    if (eqP >= 0) G(k, eqP) -= alpha;
+                    if (eqM >= 0) G(k, eqM) += alpha;
+
+                    I(k) += rhs;
                 }
+
 
                 for (const auto& m : mosfets) {
                     const auto& nodes = m->getNodeIds();
@@ -1142,15 +1159,16 @@ void TransientAnalysis::runTrapezoidal(){
             dtPrev    = dtTry;
 
             // 当前 dt * 2
-            dt = dt > dtMax ? dt * 2.0 : dtTry * 2.0;
+            dt = dtTry >= 0.5 *dtMax ? dt : dtTry * 2.0;
 
             ++step;
             accepted = true;
         }
     }
-
-    std::cout << "Transient analysis (Trapezoidal + ConvController) finished. "
-              << "Results written to '" << outFile << "'.\n";
+    if (sim.verbose) {
+        std::cout << "Transient analysis (Trapezoidal + ConvController) finished. "
+                << "Results written to '" << outFile << "'.\n";
+    }
 }
 
 // ========= 后向欧拉单周期积分（用于周期性稳态分析） =========
