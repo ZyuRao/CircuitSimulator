@@ -38,15 +38,19 @@ Rs1 112 110 25
 Rs2 113 111 25
 
 * level 1 models
+
 .MODEL 1 VT -0.58281 MU 1.224952e-2 COX 6.058e-3 LAMBDA 0.05 CJ0 4.0e-14
 .MODEL 2 VT 0.386 MU 3.0238e-2 COX 6.058e-3 LAMBDA 0.05 CJ0 4.0e-14
 
-.TRAN 1e-13 5e-9
-.hb 100e6 30
+.TRAN 1e-11 4e-9
+*.hb 100e6 30
 .plotnv  102
 .plotnv  103 
 *.plotnv  112 
 *.plotnv  113 
 *.plotnv  154 
 *.plotnv  164
+
+*.probe hb V(102) V(103) 
+*.probe hb V(102) V(103) V(107)
 .end

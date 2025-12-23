@@ -5,6 +5,9 @@
 #include "analysis.hpp"
 
 #include <future>
+#include <chrono>
+#include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -336,16 +339,195 @@ bool writeFullStaticCsv(const Circuit& ckt,
 
 Runner::Runner(const std::string& outDir_) : outDir(outDir_) {}
 
-int Runner::run(const std::string& netlistPath) {
+
+namespace {
+
+struct RunnerOptions {
+    bool manualRunList = false;      // 若 true：忽略网表 enable/doOp，只按 runOp/runTran/runHb 运行
+    bool runOp   = false;
+    bool runTran = false;
+    bool runHb   = false;
+
+    DcSolverKind dcSolver = DcSolverKind::GaussSeidel;
+
+    enum class TranMethod { TR, BE };
+    TranMethod tranMethod = TranMethod::TR;
+
+    bool parallel = true;
+    bool timing   = true;
+
+    bool printHelp = false;
+};
+
+static std::string toLowerCopy(std::string s) {
+    for (char& ch : s) ch = (char)std::tolower((unsigned char)ch);
+    return s;
+}
+
+static bool startsWith(const std::string& s, const std::string& pfx) {
+    return s.size() >= pfx.size() && s.compare(0, pfx.size(), pfx) == 0;
+}
+
+static std::vector<std::string> splitCommaList(const std::string& s) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (char ch : s) {
+        if (ch == ',') {
+            if (!cur.empty()) out.push_back(cur);
+            cur.clear();
+        } else {
+            cur.push_back(ch);
+        }
+    }
+    if (!cur.empty()) out.push_back(cur);
+    return out;
+}
+
+static void applyRunList(RunnerOptions& opt, const std::string& listRaw) {
+    std::string list = toLowerCopy(listRaw);
+    auto items = splitCommaList(list);
+    if (items.empty()) return;
+
+    opt.manualRunList = true;
+    opt.runOp = opt.runTran = opt.runHb = false;
+
+    for (const auto& it : items) {
+        if (it == "all") {
+            opt.runOp = opt.runTran = opt.runHb = true;
+            continue;
+        }
+        if (it == "auto") {
+            opt.manualRunList = false; // 退回网表驱动
+            continue;
+        }
+        if (it == "op" || it == "dc") opt.runOp = true;
+        else if (it == "tran" || it == "transient") opt.runTran = true;
+        else if (it == "hb") opt.runHb = true;
+    }
+}
+
+static RunnerOptions parseRunnerArgs(int argc, char** argv) {
+    RunnerOptions opt;
+    if (argc <= 2) return opt;
+
+    for (int i = 2; i < argc; ++i) {
+        std::string a = argv[i];
+        std::string al = toLowerCopy(a);
+
+        if (al == "--help" || al == "-h") { opt.printHelp = true; continue; }
+        if (al == "--no-parallel") { opt.parallel = false; continue; }
+        if (al == "--parallel") { opt.parallel = true; continue; }
+        if (al == "--no-timing") { opt.timing = false; continue; }
+        if (al == "--timing") { opt.timing = true; continue; }
+
+        // 位置参数：op/tran/hb/all
+        if (al == "op" || al == "dc") { applyRunList(opt, "op"); continue; }
+        if (al == "tran" || al == "transient") { applyRunList(opt, "tran"); continue; }
+        if (al == "hb") { applyRunList(opt, "hb"); continue; }
+        if (al == "all") { applyRunList(opt, "all"); continue; }
+
+        if (startsWith(al, "--run=")) {
+            applyRunList(opt, a.substr(std::string("--run=").size()));
+            continue;
+        }
+
+        if (startsWith(al, "--dc-solver=")) {
+            std::string v = toLowerCopy(a.substr(std::string("--dc-solver=").size()));
+            if (v == "lu") opt.dcSolver = DcSolverKind::LU;
+            else opt.dcSolver = DcSolverKind::GaussSeidel;
+            continue;
+        }
+
+        if (startsWith(al, "--tran-method=")) {
+            std::string v = toLowerCopy(a.substr(std::string("--tran-method=").size()));
+            if (v == "be" || v == "backwardeuler") opt.tranMethod = RunnerOptions::TranMethod::BE;
+            else opt.tranMethod = RunnerOptions::TranMethod::TR;
+            continue;
+        }
+
+        // 未知参数：不失败，仅警告
+        std::cerr << "[Runner] WARNING: unknown option '" << a << "' ignored.\n";
+    }
+
+    return opt;
+}
+
+static void printRunnerHelp(const char* argv0) {
+    std::cout
+        << "Usage:\n"
+        << "  " << argv0 << " <netlist.sp> [op|tran|hb|all] [options]\n\n"
+        << "Options:\n"
+        << "  --run=op,tran,hb|all     Manually choose analyses to run (overrides netlist enable flags)\n"
+        << "  --dc-solver=gs|lu        Choose DC/OP solver (default: gs)\n"
+        << "  --tran-method=tr|be      Choose transient integrator (default: tr)\n"
+        << "  --no-parallel            Run analyses sequentially\n"
+        << "  --no-timing              Disable timing prints\n"
+        << "  -h, --help               Show this help\n\n"
+        << "Notes:\n"
+        << "  - To enable CLI options, main.cpp should call: runner.run(argc, argv)\n"
+        << "  - If main.cpp still calls runner.run(netlistPath), you can use env vars:\n"
+        << "      SIM_RUN=op,tran,hb|all, SIM_DCSOLVER=gs|lu, SIM_TRAN=tr|be, SIM_TIMING=0/1, SIM_PARALLEL=0/1\n";
+}
+
+struct Timer {
+    using Clock = std::chrono::steady_clock;
+    Clock::time_point t0;
+    explicit Timer() : t0(Clock::now()) {}
+    double ms() const {
+        auto t1 = Clock::now();
+        auto us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+        return (double)us / 1000.0;
+    }
+};
+
+static const char* dcSolverName(DcSolverKind k) {
+    switch (k) {
+    case DcSolverKind::LU: return "LU";
+    case DcSolverKind::GaussSeidel:
+    default: return "GaussSeidel";
+    }
+}
+
+static const char* tranMethodName(RunnerOptions::TranMethod m) {
+    return (m == RunnerOptions::TranMethod::BE) ? "BE" : "TR";
+}
+
+// 核心实现：把“旧 Runner::run()”逻辑搬到这里，只增加：手动选择 + 计时 + 方法选择
+static int runImpl(const std::string& outDir, const std::string& netlistPath, RunnerOptions opt) {
+    Timer totalTimer;
+
     Circuit ckt;
     SimulationConfig sim;
 
+    Timer parseTimer;
     std::cout << "Reading netlist: " << netlistPath << "\n";
     if (!parseNetlist(netlistPath, ckt, sim)) {
         std::cerr << "Parse netlist failed.\n";
         return 1;
     }
     ckt.assignEquationIndices();
+    if (opt.timing) {
+        std::cout << "[TIME] Netlist parse + index: " << std::fixed << std::setprecision(3) << parseTimer.ms() << " ms\n";
+    }
+
+    // 运行计划：默认按网表；若 opt.manualRunList=true 则按用户选择
+    bool wantOp   = opt.manualRunList ? opt.runOp   : sim.doOp;
+    bool wantTran = opt.manualRunList ? opt.runTran : sim.tran.enabled;
+    bool wantHb   = opt.manualRunList ? opt.runHb   : sim.hb.enabled;
+
+    // “手动选择模式”的提示
+    if (opt.manualRunList) {
+        std::cout << "[Runner] Manual run list enabled: "
+                  << (wantOp ? "OP " : "")
+                  << (wantTran ? "TRAN " : "")
+                  << (wantHb ? "HB " : "")
+                  << "\n";
+    }
+
+    std::cout << "[Runner] DC solver = " << dcSolverName(opt.dcSolver)
+              << ", TRAN method = " << tranMethodName(opt.tranMethod)
+              << ", parallel = " << (opt.parallel ? "on" : "off")
+              << ", timing = " << (opt.timing ? "on" : "off") << "\n";
 
     std::filesystem::create_directories(outDir);
     std::filesystem::path caseStem = std::filesystem::path(netlistPath).stem();
@@ -360,17 +542,26 @@ int Runner::run(const std::string& netlistPath) {
 
     Eigen::VectorXd opSolution;
     bool opReady = false;
+    double opSolveMs = 0.0;
+
     auto ensureOp = [&]() -> const Eigen::VectorXd& {
         if (!opReady) {
-            DcAnalysis dc(ckt, sim, DcSolverKind::GaussSeidel);
+            Timer t;
+            DcAnalysis dc(ckt, sim, opt.dcSolver);
             opSolution = dc.run();
             opReady = true;
+            opSolveMs = t.ms();
+            if (opt.timing) {
+                std::cout << "[TIME] DC/OP (" << dcSolverName(opt.dcSolver) << "): "
+                          << std::fixed << std::setprecision(3) << opSolveMs << " ms\n";
+            }
         }
         return opSolution;
     };
 
     // OP
-    if (sim.doOp) {
+    if (wantOp) {
+        Timer tTotal;
         std::cout << "[OP] Running operating point\n";
         const Eigen::VectorXd& xop = ensureOp();
         std::string raw = rawPath("op");
@@ -383,6 +574,10 @@ int Runner::run(const std::string& netlistPath) {
                                   collectPlotProbes(sim, AnalysisType::OP));
         bool ok = filterCsv(raw, finalCsv, probes);
         if (!ok) return 3;
+
+        if (opt.timing) {
+            std::cout << "[TIME] OP total: " << std::fixed << std::setprecision(3) << tTotal.ms() << " ms\n";
+        }
     }
 
     // DC sweep 未实现
@@ -394,17 +589,30 @@ int Runner::run(const std::string& netlistPath) {
     std::vector<std::future<int>> tasks;
 
     auto runTranTask = [&]() -> int {
-        if (!sim.tran.enabled) return 0;
-        std::cout << "[TRAN] Running transient (TR)\n";
+        if (!wantTran || !sim.tran.enabled) {
+            if (wantTran && !sim.tran.enabled) {
+                std::cerr << "[TRAN] Requested but .TRAN missing; skipped.\n";
+            }
+            return 0;
+        }
+
+        Timer tAll;
+        std::cout << "[TRAN] Running transient (" << tranMethodName(opt.tranMethod) << ")\n";
         std::string raw = rawPath("tran");
         std::string finalCsv = csvPath("tran");
+
+        double solveMs = 0.0;
         try {
+            Timer tSolve;
             TransientAnalysis tran(ckt, sim, raw);
-            tran.runTrapezoidal();
+            if (opt.tranMethod == RunnerOptions::TranMethod::BE) tran.runBackwardEuler();
+            else tran.runTrapezoidal();
+            solveMs = tSolve.ms();
         } catch (const std::exception& e) {
             std::cerr << "[TRAN] Exception: " << e.what() << "\n";
             return 4;
         }
+
         auto plotProbes = collectPlotProbes(sim, AnalysisType::TRAN);
         auto probes = mergeProbes(collectCsvProbes(sim, AnalysisType::TRAN), plotProbes);
         bool ok = filterCsv(raw, finalCsv, probes);
@@ -425,20 +633,36 @@ int Runner::run(const std::string& netlistPath) {
             std::string pngPath = (std::filesystem::path(outDir) / (caseStem.string() + "_tran_probe.png")).string();
             runPythonPlot(finalCsv, plotCols, pngPath);
         }
+
+        if (opt.timing) {
+            std::cout << "[TIME] TRAN solve: " << std::fixed << std::setprecision(3) << solveMs
+                      << " ms, total: " << tAll.ms() << " ms\n";
+        }
         return 0;
     };
 
     auto runHbTask = [&]() -> int {
-        if (!sim.hb.enabled) return 0;
+        if (!wantHb || !sim.hb.enabled) {
+            if (wantHb && !sim.hb.enabled) {
+                std::cerr << "[HB] Requested but .HB missing; skipped.\n";
+            }
+            return 0;
+        }
+
+        Timer tAll;
         std::cout << "[HB] Running harmonic balance\n";
         std::string raw = rawPath("hb");
         std::string finalCsv = csvPath("hb");
+
+        double solveMs = 0.0;
         try {
             const Eigen::VectorXd& xdc = ensureOp();
+            Timer tSolve;
             HbAnalysis hb(ckt, sim, xdc);
             Eigen::VectorXd xhb;
-            bool ok = hb.run(xhb, raw);
-            if (!ok) {
+            bool okRun = hb.run(xhb, raw);
+            solveMs = tSolve.ms();
+            if (!okRun) {
                 std::cerr << "[HB] Convergence failed.\n";
                 return 6;
             }
@@ -446,6 +670,7 @@ int Runner::run(const std::string& netlistPath) {
             std::cerr << "[HB] Exception: " << e.what() << "\n";
             return 7;
         }
+
         auto plotProbes = collectPlotProbes(sim, AnalysisType::HB);
         auto probes = mergeProbes(collectCsvProbes(sim, AnalysisType::HB), plotProbes);
         bool ok = filterCsv(raw, finalCsv, probes);
@@ -466,14 +691,22 @@ int Runner::run(const std::string& netlistPath) {
             std::string pngPath = (std::filesystem::path(outDir) / (caseStem.string() + "_hb_probe.png")).string();
             runPythonPlot(finalCsv, plotCols, pngPath);
         }
+
+        if (opt.timing) {
+            std::cout << "[TIME] HB solve: " << std::fixed << std::setprecision(3) << solveMs
+                      << " ms, total: " << tAll.ms() << " ms\n";
+        }
         return 0;
     };
 
-    if (sim.tran.enabled) {
-        tasks.push_back(std::async(std::launch::async, runTranTask));
-    }
-    if (sim.hb.enabled) {
-        tasks.push_back(std::async(std::launch::async, runHbTask));
+    if (opt.parallel) {
+        if (wantTran && sim.tran.enabled) tasks.push_back(std::async(std::launch::async, runTranTask));
+        if (wantHb && sim.hb.enabled)     tasks.push_back(std::async(std::launch::async, runHbTask));
+    } else {
+        int rc = runTranTask();
+        if (rc != 0) return rc;
+        rc = runHbTask();
+        if (rc != 0) return rc;
     }
 
     for (auto& f : tasks) {
@@ -485,6 +718,55 @@ int Runner::run(const std::string& netlistPath) {
         std::cerr << "[AC] AC analysis not implemented; skipped.\n";
     }
 
+    if (opt.timing) {
+        std::cout << "[TIME] Total: " << std::fixed << std::setprecision(3) << totalTimer.ms() << " ms\n";
+    }
+
     std::cout << "All requested analyses finished. Outputs in " << outDir << "\n";
     return 0;
 }
+
+} // namespace
+
+int Runner::run(int argc, char** argv) {
+    if (argc < 2 || argv == nullptr) {
+        std::cerr << "Usage: sim <netlist.sp> [op|tran|hb|all] [options]\n";
+        return 1;
+    }
+
+    RunnerOptions opt = parseRunnerArgs(argc, argv);
+    if (opt.printHelp) {
+        printRunnerHelp(argv[0]);
+        return 0;
+    }
+    return runImpl(this->outDir, std::string(argv[1]), opt);
+}
+
+int Runner::run(const std::string& netlistPath) {
+    // 兼容旧入口：保留“网表驱动”行为；同时支持用环境变量临时手动选择/切换方法
+    RunnerOptions opt;
+
+    if (const char* v = std::getenv("SIM_RUN")) {
+        applyRunList(opt, v);
+    }
+    if (const char* v = std::getenv("SIM_DCSOLVER")) {
+        std::string s = toLowerCopy(v);
+        opt.dcSolver = (s == "lu") ? DcSolverKind::LU : DcSolverKind::GaussSeidel;
+    }
+    if (const char* v = std::getenv("SIM_TRAN")) {
+        std::string s = toLowerCopy(v);
+        opt.tranMethod = (s == "be") ? RunnerOptions::TranMethod::BE : RunnerOptions::TranMethod::TR;
+    }
+    if (const char* v = std::getenv("SIM_TIMING")) {
+        std::string s = toLowerCopy(v);
+        opt.timing = !(s == "0" || s == "false" || s == "off");
+    }
+    if (const char* v = std::getenv("SIM_PARALLEL")) {
+        std::string s = toLowerCopy(v);
+        opt.parallel = !(s == "0" || s == "false" || s == "off");
+    }
+
+    return runImpl(this->outDir, netlistPath, opt);
+}
+
+
