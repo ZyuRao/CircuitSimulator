@@ -19,6 +19,7 @@ CircuitSimulator 是一个简化版电路仿真器，读取类 SPICE 网表并�
     - `.OP`（工作点）
     - `.TRAN`（瞬态）
     - `.HB`（谐波平衡，Newton）
+    - `.PSS`(打靶发求解周期稳态)
 
 - 观测/输出控制：
     - `.PRINT` / `.PROBE`

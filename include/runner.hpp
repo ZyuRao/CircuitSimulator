@@ -12,6 +12,10 @@ public:
     // 返回 0 表示成功，非 0 表示错误码
     int run(const std::string& netlistPath);
 
+    // 可选：从命令行参数运行（支持手动选择分析/方法 + 计时打印）
+    int run(int argc, char** argv);
+
+
 private:
     std::string outDir;
     bool verbose = false;

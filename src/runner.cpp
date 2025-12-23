@@ -25,6 +25,7 @@ std::string analysisTag(AnalysisType a) {
         case AnalysisType::AC:   return "ac";
         case AnalysisType::TRAN: return "tran";
         case AnalysisType::HB:   return "hb";
+        case AnalysisType::PSS:  return "pss";
         default: return "unknown";
     }
 }
@@ -270,18 +271,53 @@ bool runPythonPlot(const std::string& csvPath,
                    const std::vector<std::string>& columns,
                    const std::string& outPng) {
     if (columns.empty()) return true;
-    std::ostringstream cmd;
-    cmd << "python3 plot_tran.py '" << csvPath << "'";
+    
+    // 构建Python命令参数列表（避免命令行字符串拼接）
+    std::vector<std::string> args;
+    args.push_back("plot_tran.py");
+    args.push_back(csvPath);
+    
     for (const auto& c : columns) {
-        cmd << " '" << c << "'";
+        args.push_back(c);
     }
+    
     if (!outPng.empty()) {
-        cmd << " --out='" << outPng << "'";
+        args.push_back("--out");
+        args.push_back(outPng);
     }
-    cmd << " > /dev/null";
-    int rc = std::system(cmd.str().c_str());
+    
+    // 使用更可靠的方式执行Python
+    std::string command;
+#ifdef _WIN32
+    command = "python";
+#else
+    command = "python3";
+#endif
+    
+    // 构建完整的命令行
+    std::ostringstream fullCmd;
+    fullCmd << command;
+    for (const auto& arg : args) {
+        fullCmd << " \"" << arg << "\"";
+    }
+    
+    // 在Windows上不重定向输出，以便看到错误信息
+#ifndef _WIN32
+    fullCmd << " > /dev/null 2>&1";
+#endif
+    
+    std::cout << "Executing: " << fullCmd.str() << std::endl;
+    
+    int rc = std::system(fullCmd.str().c_str());
     if (rc != 0) {
-        std::cerr << "Plot script failed for " << csvPath << " (code " << rc << ")\n";
+        std::cerr << "Plot script failed with code: " << rc << std::endl;
+        
+        // 检查文件是否存在
+        if (!std::filesystem::exists(csvPath)) {
+            std::cerr << "CSV file does not exist: " << csvPath << std::endl;
+        } else {
+            std::cerr << "CSV file exists, size: " << std::filesystem::file_size(csvPath) << " bytes" << std::endl;
+        }
         return false;
     }
     return true;
@@ -479,6 +515,59 @@ int Runner::run(const std::string& netlistPath) {
         return 0;
     };
 
+    auto runPssTask = [&]() -> int {
+        if (!sim.pss.enabled) return 0;
+        if (sim.verbose) {
+            std::cout << "[PSS] Running shooting periodic steady state\n";
+        }
+        
+        std::string raw = rawPath("pss");
+        std::string finalCsv = csvPath("pss");
+        
+        try {
+            // 调用shooting分析函数
+            ShootingPssConfig cfg;
+            cfg.periodT = sim.pss.periodT;
+            cfg.tstep = sim.pss.tstep;
+            cfg.maxIters = 50;    // 可以配置化
+            cfg.tol = 1e-6;       // 可以配置化
+            cfg.relax = 0.5;      // 可以配置化
+            
+            runPssShootingAnalysis(ckt, sim, cfg, raw);
+        } catch (const std::exception& e) {
+            std::cerr << "[PSS] Exception: " << e.what() << "\n";
+            return 9;
+        }
+        
+        // 处理输出CSV，类似于TRAN和HB
+        auto plotProbes = collectPlotProbes(sim, AnalysisType::PSS);
+        auto probes = mergeProbes(collectCsvProbes(sim, AnalysisType::PSS), plotProbes);
+        bool ok = filterCsv(raw, finalCsv, probes);
+        if (!ok) return 10;
+        
+        // 绘图处理
+        std::vector<std::string> plotCols;
+        auto header = readHeader(finalCsv);
+        std::unordered_set<std::string> avail(header.begin(), header.end());
+        for (const auto& p : plotProbes) {
+            std::string name = probeHeaderName(p);
+            if (avail.count(name)) {
+                plotCols.push_back(name);
+            } else {
+                std::cerr << "[PSS] Probe column not in CSV: " << name << "\n";
+            }
+        }
+        if (!plotCols.empty() && sim.enablePlot) {
+            std::string pngPath = (std::filesystem::path(outDir) / (caseStem.string() + "_pss_probe.png")).string();
+            runPythonPlot(finalCsv, plotCols, pngPath);
+        }
+        return 0;
+    };
+
+
+    if (sim.pss.enabled) {
+        tasks.push_back(std::async(std::launch::async, runPssTask));
+    }
     if (sim.tran.enabled) {
         tasks.push_back(std::async(std::launch::async, runTranTask));
     }

@@ -437,6 +437,7 @@ AnalysisType NetlistParser::parseAnalysisTypeFromToken(
     if (t == "ac")   return AnalysisType::AC;
     if (t == "tran") return AnalysisType::TRAN;
     if (t == "hb")   return AnalysisType::HB;
+    if (t == "pss")  return AnalysisType::PSS;
     return AnalysisType::NONE;
 }
 
@@ -467,6 +468,8 @@ void NetlistParser::parseDotCard(const Statement& st) {
         parseModelCard(st);
     } else if (head == ".hb") {
         parseHbCard(st);
+    } else if (head == ".pss") {
+        parsePssCard(st);
     } else if (head == ".plotnv") {
         parsePlotNvCard(st);
     } else if (head == ".plotnc") {
@@ -579,6 +582,33 @@ void NetlistParser::parseHbCard(const Statement& st) {
 
     cfg.enabled = true;
     sim.hb = cfg;
+}
+
+void NetlistParser::parsePssCard(const Statement& st) {
+    const auto& t = st.tokens;
+    if (t.size() < 3) {
+        std::cerr << "Line " << st.lineNo
+                  << ": invalid .PSS syntax (expect: .pss f0 tstep): " << st.raw << "\n";
+        return;
+    }
+
+    PssConfig cfg;
+    double f0 = 0.0;
+
+    try {
+        f0 = parseSpiceNumber(t[1]);      // Hz
+        cfg.tstep = parseSpiceNumber(t[2]); // s
+        if (f0 <= 0.0) throw std::runtime_error("f0 must be > 0");
+        cfg.periodT = 1.0 / f0;           // s
+    } catch (const std::exception& e) {
+        std::cerr << "Line " << st.lineNo
+                  << ": cannot parse .PSS arguments: " << e.what()
+                  << " in '" << st.raw << "'\n";
+        return;
+    }
+
+    cfg.enabled = true;
+    sim.pss = cfg;
 }
 
 //.PRINT解析

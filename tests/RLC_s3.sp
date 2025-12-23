@@ -21,6 +21,9 @@ Cl 4 0 10u
 
 .HB 200 20
 .TRAN 0.004m 20m
-.PROBE V(4)
-.print V(4)
+.PSS 200 1e-5
+.PLOTNV 4
+.PROBE tran V(4)
+.PROBE pss V(4)
+.print hb V(4)
 .end

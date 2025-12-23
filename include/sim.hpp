@@ -13,7 +13,8 @@ enum class AnalysisType {
     DC,
     AC,
     TRAN,
-    HB
+    HB,
+    PSS
 };
 
 enum class AcSweepType {
@@ -194,6 +195,12 @@ struct HbConfig {
     int nHarm = 0;
 };
 
+struct PssConfig {
+    bool enabled = false;
+    double periodT;
+    double tstep;
+};
+
 struct ProbeSpec {
     ProbeKind kind = ProbeKind::NodeVoltage;
     std::string expr;
@@ -222,6 +229,7 @@ public:
     TranConfig tran;
     AcConfig ac;
     HbConfig hb;
+    PssConfig pss;
     std::vector<PrintCommand> printCommands;
     std::vector<ProbeCommand> probeCommands;
 
@@ -232,7 +240,7 @@ public:
 
 
     bool hasAnyAnalysis() const {
-        return doOp || !dcSweeps.empty() || tran.enabled || ac.enabled || hb.enabled;
+        return doOp || !dcSweeps.empty() || tran.enabled || ac.enabled || hb.enabled || pss.enabled;
     }
 
     void ensureDefaultOp() {
