@@ -143,7 +143,7 @@ Mname nd ng ns p|n W L modelId
 - $V_T < 0$ 视为 PMOS（内部会转成正值存储）
 - $V_T \geq 0$ 视为 NMOS
 
-### 4) 控制卡（.OP / .TRAN / .HB / .DC / .AC / .MODEL / .PRINT / .PROBE / .PLOTNV / .PLOTNC）
+### 4) 控制卡（.OP / .TRAN / .HB / .PSS / .DC / .AC / .MODEL / .PRINT / .PROBE / .PLOTNV / .PLOTNC）
 `.OP`
 ```spice
 .OP
@@ -156,6 +156,11 @@ Mname nd ng ns p|n W L modelId
 `.HB`
 ```spice
 .HB f0 nHarm
+```
+
+`.PSS`
+```spice
+.PSS f0 tstep
 ```
 `.DC`**（已解析，暂未实现运行）**
 ```spice

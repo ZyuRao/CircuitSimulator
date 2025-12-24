@@ -205,6 +205,10 @@ private:
         double vgdPrev = 0.0;
         double vsbPrev = 0.0;
         double vdbPrev = 0.0;
+        double igsPrev = 0.0;
+        double igdPrev = 0.0;
+        double isbPrev = 0.0;
+        double idbPrev = 0.0; 
     };
 
     // 后向欧拉的“电容 + 历史电流源”等效 stamp

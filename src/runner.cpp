@@ -444,7 +444,7 @@ int Runner::run(const std::string& netlistPath) {
         std::string finalCsv = csvPath("tran");
         try {
             TransientAnalysis tran(ckt, sim, raw);
-            tran.runTrapezoidal();
+            tran.runBackwardEuler();
         } catch (const std::exception& e) {
             std::cerr << "[TRAN] Exception: " << e.what() << "\n";
             return 4;

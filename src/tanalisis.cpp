@@ -311,7 +311,7 @@ void TransientAnalysis::runBackwardEuler() {
                 stampCapBE(eq1, eq2, Cval, dtTry, vPrev, G, I);
             }
 
-            // 4) 电感 BE v_n+1 = L/dt * i_n+1 - L/dt * i_n
+            // 4) 电感 BE
             for (const auto& L : inds) {
                 double Lval = L->getL();
                 if (Lval <= 0.0) continue;
@@ -325,17 +325,24 @@ void TransientAnalysis::runBackwardEuler() {
                 if (k < 0 || k >= N) continue;
 
                 double iPrev = indIprev[L.get()];
-                double alpha = dtTry / Lval;   // = 1/R_eq
-
-                // 节点 KCL：不变
+                double G_eq = dt / Lval;
+                double I_hist = iPrev; 
+                if (eqP >= 0) {
+                    G(eqP, eqP) += G_eq;
+                    I(eqP) += -I_hist;
+                }
+                if (eqM >= 0) {
+                    G(eqM, eqM) += G_eq; 
+                    I(eqM) += I_hist;
+                }
+                if (eqP >= 0 && eqM >= 0) {
+                    G(eqP, eqM) -= G_eq;
+                    G(eqM, eqP) -= G_eq;
+                }
                 if (eqP >= 0) G(eqP, k) += 1.0;
                 if (eqM >= 0) G(eqM, k) -= 1.0;
-
-                // 支路方程（k 行）： alpha*(Vp - Vm) - i_{n+1} = -iPrev
-                if (eqP >= 0) G(k, eqP) += +alpha;
-                if (eqM >= 0) G(k, eqM) += -alpha;
-                G(k, k) += -1.0;
-                I(k)    += -iPrev;
+                if (eqP >= 0) G(k, eqP) += 1.0;
+                if (eqM >= 0) G(k, eqM) -= 1.0;
             }
 
 
@@ -858,18 +865,26 @@ void TransientAnalysis::runTrapezoidal(){
 
                     const IndTrapState& st = indState[L.get()];
 
-                    double alpha = dtTry / (2.0 * Lval);
+                    double G_eq = dtTry / (2.0 * Lval);  // 等效电导
+                    double I_hist = st.iPrev + G_eq * st.vPrev;  // 历史电流源
 
-                    double rhs = st.iPrev + alpha * st.vPrev;
-
+                    // 在节点方程中直接添加诺顿等效贡献
+                    if (eqP >= 0) {
+                        G(eqP, eqP) += G_eq;
+                        I(eqP) += -I_hist;
+                    }
+                    if (eqM >= 0) {
+                        G(eqM, eqM) += G_eq;
+                        I(eqM) += I_hist;
+                    }
+                    if (eqP >= 0 && eqM >= 0) {
+                        G(eqP, eqM) -= G_eq;
+                        G(eqM, eqP) -= G_eq;
+                    }
                     if (eqP >= 0) G(eqP, k) += 1.0;
                     if (eqM >= 0) G(eqM, k) -= 1.0;
 
                     G(k, k) += 1.0;
-                    if (eqP >= 0) G(k, eqP) -= alpha;
-                    if (eqM >= 0) G(k, eqM) += alpha;
-
-                    I(k) += rhs;
                 }
 
 
@@ -1328,15 +1343,25 @@ VectorXd TransientAnalysis::integrateOnePeriodBE(
 
                 double R_eq  = Lval / dt;
                 double iPrev = indIprev[L.get()];
-                double V_hist = -R_eq * iPrev;
+                double G_eq = dt / Lval;
+                double I_hist = iPrev;
 
+                if (eqP >= 0) {
+                    G(eqP, eqP) += G_eq;
+                    I(eqP) += -I_hist;
+                }
+                if (eqM >= 0) {
+                    G(eqM, eqM) += G_eq; 
+                    I(eqM) += I_hist;
+                }
+                if (eqP >= 0 && eqM >= 0) {
+                    G(eqP, eqM) -= G_eq;
+                    G(eqM, eqP) -= G_eq;
+                }
                 if (eqP >= 0) G(eqP, k) += 1.0;
                 if (eqM >= 0) G(eqM, k) -= 1.0;
-
                 if (eqP >= 0) G(k, eqP) += 1.0;
                 if (eqM >= 0) G(k, eqM) -= 1.0;
-                G(k, k) += -R_eq;
-                I(k)    += V_hist;
             }
 
             // 5) MOS 寄生电容（用 Cj0 粗略近似）
