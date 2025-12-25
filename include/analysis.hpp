@@ -43,11 +43,11 @@ struct ConvParams {
     double fAbsTol      = 1e-12;  // residual: abs
     double fRelTol      = 1e-8;   // residual: rel * max(1, ||rhs||)
 
-    // GS inner linear-solve acceptance (你原来写在 solveNewtonGS 里的 acceptTol)
+    // GS inner linear-solve acceptance
     double linRelTolStart = 5e-3; // scale=0
     double linRelTolFinal = 1e-6; // scale=1
 
-    // continuation / line-search (你原来写在 solveNewtonGS 里的参数)
+    // continuation / line-search
     int    maxLineSearch = 12;
     double armijoC1      = 1e-4;
     double lsAlphaMin    = 0.02;
@@ -69,17 +69,17 @@ public:
     static ConvController forDc(DcSolverKind kind);
     static ConvController forHb();
 
-    ConvController() = default; // 保留以免你其它地方一堆报错
+    ConvController() = default;
     ConvController(NonlinearSolveRole role, const ConvParams& p)
         : role_(role), p_(p) {}
 
     const ConvParams& params() const { return p_; }
 
-    // 关键：baseGmin 你原公式写错了，这里修正为线性插值
+    // 线性插值
     double baseGmin(double rampScale) const {
         double s = std::clamp(rampScale, 0.0, 1.0);
         double g = p_.gminHighBase * (1.0 - s) + p_.gminLowBase * s;
-        return std::max(g, 1e-9);   // DC 建议别低于 1e-9，除非你做了“浮动节点检测”
+        return std::max(g, 1e-9);
     }
 
     double stepTol(double rampScale) const {
@@ -96,7 +96,6 @@ public:
         return p_.fAbsTol + p_.fRelTol * std::max(1.0, rhsNorm);
     }
 
-    // 线性内解拒绝时的统一策略（你原来散落在 solveNewtonGS 里）
     void onLinearReject(double& alpha, double& gmin) const {
         gmin  = std::min(gmin * 10.0, p_.gminAbsMax);
         alpha = std::max(alpha * 0.5, p_.alphaMin);
@@ -115,7 +114,6 @@ public:
         double rampScale,
         double tol
     ) const {
-        // 这里 prevErr 在你旧代码里其实是“上一次步长/误差”
         auto st = updateStep(x, xRaw, prevErr, iter, alphaCurrent, gminCurrent, rampScale);
         st.converged = std::isfinite(st.error) && (st.error < tol);
         return st;
@@ -205,6 +203,10 @@ private:
         double vgdPrev = 0.0;
         double vsbPrev = 0.0;
         double vdbPrev = 0.0;
+        double igsPrev = 0.0;
+        double igdPrev = 0.0;
+        double isbPrev = 0.0;
+        double idbPrev = 0.0; 
     };
 
     // 后向欧拉的“电容 + 历史电流源”等效 stamp

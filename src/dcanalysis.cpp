@@ -336,7 +336,6 @@ VectorXd DcAnalysis::solveNewtonGS() const {
             for (int lsit = 0; lsit < p.maxLineSearch; ++lsit) {
                 VectorXd cand = xTry + alpha * w.F;
 
-                // 注意：这里用 cand 重新 stamp 后的 residual 做判据（非线性意义上）
                 double Fcand = residualNorm(cand, targetScale, gmin);
 
                 if (std::isfinite(Fcand) && (Fcand <= (1.0 - p.armijoC1 * alpha) * Fnorm)) {
@@ -390,35 +389,6 @@ VectorXd DcAnalysis::solveNewtonGS() const {
     return xGood;
 }
 
-
-
-
-
-// ====================== 对外接口 ======================
-
-// 显式：DC + LU（内部统一用自写 LU）
-// VectorXd dcSolveLU(const Circuit& ckt) {
-//     if (hasNonlinearDevices(ckt)) {
-//         return dcSolveNewtonLU(ckt);
-//     } else {
-//         return dcSolveDirectLU(ckt);
-//     }
-// }
-
-// // 显式：DC + Gauss-Seidel
-// VectorXd dcSolveGaussSeidel(const Circuit& ckt) {
-//     if (hasNonlinearDevices(ckt)) {
-//         return dcSolveNewtonGS(ckt);
-//     } else {
-//         return dcSolveDirectGS(ckt);
-//     }
-// }
-
-// // 老接口：现在默认等价于 Gauss-Seidel 版本
-// VectorXd dcSolve(const Circuit& ckt) {
-//     return dcSolveLU(ckt);
-// }
-
 ConvController ConvController::forDc(DcSolverKind kind) {
     ConvParams p;
 
@@ -449,7 +419,7 @@ ConvController ConvController::forDc(DcSolverKind kind) {
         p.gminLowBase  = 3.325e-7;
         p.gminAbsMax   = 1e-2;
 
-        // GS 内线性解验收阈值（你原本写死在 solveNewtonGS）
+        // GS 内线性解验收阈值
         p.linRelTolStart = 5e-3;
         p.linRelTolFinal = 1e-6;
 
@@ -529,7 +499,6 @@ ConvStatus ConvController::updateStep(
     st.alphaNext = alpha;
     st.gminNext  = gminNext;
     st.error     = stepNow;
-    // “step 收敛”只是一条腿，LU 警告修复要靠 residual（下面 solveNewtonLU 会加）
     st.converged = false;
     return st;
 }

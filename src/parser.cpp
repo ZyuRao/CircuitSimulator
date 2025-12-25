@@ -268,7 +268,7 @@ void NetlistParser::parseInductor(const Statement& st) {
 }
 
 //支持：Vname np nm value / Vname np nm DC value
-//新增支持：Vname np nm SIN v0 va freq [td [phi]]
+//支持：Vname np nm SIN v0 va freq [td [phi]]
 void NetlistParser::parseVoltageSource(const Statement& st) {
     const auto& t = st.tokens;
     if (t.size() < 4) {

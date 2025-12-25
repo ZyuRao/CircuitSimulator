@@ -54,8 +54,7 @@ void TransientAnalysis::stampCapBE(int eq1, int eq2,
     if (eq2 >= 0) I(eq2) += I_hist;
 }
 
-// 梯形法版本的电容伴随模型
-// C 接在 eq1 与 eq2 之间，vPrev = V(eq1)^n - V(eq2)^n，iPrev 为上一步从 eq1->eq2 的电流
+// 梯形法电容
 void TransientAnalysis::stampCapTR(int eq1, int eq2,
                        double C, double dt,
                        double vPrev, double iPrev,
@@ -73,9 +72,6 @@ void TransientAnalysis::stampCapTR(int eq1, int eq2,
         G(eq2, eq1) -= Gc;
     }
 
-    // 梯形法的历史电流源：
-    //   i^{n+1} = Gc * v^{n+1} + I_hist
-    // 推导得：I_hist = -Gc * vPrev - iPrev
     double I_hist = -Gc * vPrev - iPrev;
     if (eq1 >= 0) I(eq1) -= I_hist;
     if (eq2 >= 0) I(eq2) += I_hist;
@@ -259,7 +255,7 @@ void TransientAnalysis::runBackwardEuler() {
     const int    maxNewtonIters = 50;
     const double tol            = 1e-6;
     const double gmin           = 1e-6;
-    const double alpha          = 0.45;   // 与原版保持一致
+    const double alpha          = 0.45;
 
 
     // 当前接受解（从 DC 开始）
@@ -311,7 +307,7 @@ void TransientAnalysis::runBackwardEuler() {
                 stampCapBE(eq1, eq2, Cval, dtTry, vPrev, G, I);
             }
 
-            // 4) 电感 BE v_n+1 = L/dt * i_n+1 - L/dt * i_n
+            // 4) 电感 BE
             for (const auto& L : inds) {
                 double Lval = L->getL();
                 if (Lval <= 0.0) continue;
@@ -325,17 +321,24 @@ void TransientAnalysis::runBackwardEuler() {
                 if (k < 0 || k >= N) continue;
 
                 double iPrev = indIprev[L.get()];
-                double alpha = dtTry / Lval;   // = 1/R_eq
-
-                // 节点 KCL：不变
+                double G_eq = dt / Lval;
+                double I_hist = iPrev; 
+                if (eqP >= 0) {
+                    G(eqP, eqP) += G_eq;
+                    I(eqP) += -I_hist;
+                }
+                if (eqM >= 0) {
+                    G(eqM, eqM) += G_eq; 
+                    I(eqM) += I_hist;
+                }
+                if (eqP >= 0 && eqM >= 0) {
+                    G(eqP, eqM) -= G_eq;
+                    G(eqM, eqP) -= G_eq;
+                }
                 if (eqP >= 0) G(eqP, k) += 1.0;
                 if (eqM >= 0) G(eqM, k) -= 1.0;
-
-                // 支路方程（k 行）： alpha*(Vp - Vm) - i_{n+1} = -iPrev
-                if (eqP >= 0) G(k, eqP) += +alpha;
-                if (eqM >= 0) G(k, eqM) += -alpha;
-                G(k, k) += -1.0;
-                I(k)    += -iPrev;
+                if (eqP >= 0) G(k, eqP) += 1.0;
+                if (eqM >= 0) G(k, eqM) -= 1.0;
             }
 
 
@@ -858,18 +861,26 @@ void TransientAnalysis::runTrapezoidal(){
 
                     const IndTrapState& st = indState[L.get()];
 
-                    double alpha = dtTry / (2.0 * Lval);
+                    double G_eq = dtTry / (2.0 * Lval);  // 等效电导
+                    double I_hist = st.iPrev + G_eq * st.vPrev;  // 历史电流源
 
-                    double rhs = st.iPrev + alpha * st.vPrev;
-
+                    // 在节点方程中直接添加诺顿等效贡献
+                    if (eqP >= 0) {
+                        G(eqP, eqP) += G_eq;
+                        I(eqP) += -I_hist;
+                    }
+                    if (eqM >= 0) {
+                        G(eqM, eqM) += G_eq;
+                        I(eqM) += I_hist;
+                    }
+                    if (eqP >= 0 && eqM >= 0) {
+                        G(eqP, eqM) -= G_eq;
+                        G(eqM, eqP) -= G_eq;
+                    }
                     if (eqP >= 0) G(eqP, k) += 1.0;
                     if (eqM >= 0) G(eqM, k) -= 1.0;
 
                     G(k, k) += 1.0;
-                    if (eqP >= 0) G(k, eqP) -= alpha;
-                    if (eqM >= 0) G(k, eqM) += alpha;
-
-                    I(k) += rhs;
                 }
 
 
@@ -1328,15 +1339,25 @@ VectorXd TransientAnalysis::integrateOnePeriodBE(
 
                 double R_eq  = Lval / dt;
                 double iPrev = indIprev[L.get()];
-                double V_hist = -R_eq * iPrev;
+                double G_eq = dt / Lval;
+                double I_hist = iPrev;
 
+                if (eqP >= 0) {
+                    G(eqP, eqP) += G_eq;
+                    I(eqP) += -I_hist;
+                }
+                if (eqM >= 0) {
+                    G(eqM, eqM) += G_eq; 
+                    I(eqM) += I_hist;
+                }
+                if (eqP >= 0 && eqM >= 0) {
+                    G(eqP, eqM) -= G_eq;
+                    G(eqM, eqP) -= G_eq;
+                }
                 if (eqP >= 0) G(eqP, k) += 1.0;
                 if (eqM >= 0) G(eqM, k) -= 1.0;
-
                 if (eqP >= 0) G(k, eqP) += 1.0;
                 if (eqM >= 0) G(k, eqM) -= 1.0;
-                G(k, k) += -R_eq;
-                I(k)    += V_hist;
             }
 
             // 5) MOS 寄生电容（用 Cj0 粗略近似）

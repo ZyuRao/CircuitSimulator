@@ -21,10 +21,11 @@ C3 118 0 1e-12
 
 .PLOTNV 101
 .PLOTNV 118
+.PLOTNV 107
 
 .TRAN 0.5e-9 500e-9
 .hb 10e6 50
 .pss 10e6 1e-9
 .PROBE hb V(107)
-.PROBE tran V(101) V(118)
-.PROBE pss V(107)
+.PROBE tran I(Vin)
+.PROBE pss  V(101) V(118)

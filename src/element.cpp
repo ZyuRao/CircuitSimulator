@@ -193,8 +193,6 @@ void VoltageSource::stampAC(Eigen::MatrixXcd& Y, Eigen::VectorXcd& J,
 }
 
 
-
-
 // 电感在 DC 中视为 0V 电压源（短路 + 支路电流未知量）
 void Inductor::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
                      const Circuit& ckt,
@@ -247,8 +245,7 @@ void MosfetBase::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
     (void)eqB; // 目前忽略体效应
     // double Vb = getV(eqB);
 
-    // ========【新增】根据端电压动态决定源/漏 ========
-    // 这里直接互换 eqD/eqS 和 Vd/Vs，其余代码完全不动。
+    // ======== 根据端电压动态决定源/漏 ========
     {
         if (!isP) {
             // NMOS：source 取电势更低的一端
@@ -344,20 +341,6 @@ void MosfetBase::stamp(Eigen::MatrixXd& G, Eigen::VectorXd& I,
     // 把 Ids 线性化为：Ids ≈ gd*Vd + gg*Vg + gs*Vs + cst
     double cst = Ids - gd * Vd - gg * Vg - gs * Vs;
 
-    // 关键：这里的“支路电流”是从 D->S，且我们在 KCL 中使用“离开节点的电流”为正。
-    //
-    // 在 D 节点：离开节点的电流 = +Ids
-    // 在 S 节点：离开节点的电流 = -Ids
-    //
-    // 所以线性化后：
-    //   D 节点的离开电流 ≈ gd*Vd + gg*Vg + gs*Vs + cst
-    //   S 节点的离开电流 ≈ -gd*Vd - gg*Vg - -gs*Vs - cst
-    //
-    // 而我们的 MNA 形式是  G * v = I，等价于  (所有支路电流之和) + I(source) = 0，
-    // 其中 I(source) 是独立源的“负”号。对非线性支路的常数项 cst，我们
-    // 等价看成一个独立电流源，于是要对 I(row) 加上“负的 cst”。
-
-    // D 节点：G(D,D)+=gd, G(D,G)+=gg, G(D,S)+=gs, I(D) -= cst
     if (eqD >= 0) {
         if (eqD >= 0) G(eqD, eqD) += gd;
         if (eqG >= 0) G(eqD, eqG) += gg;
@@ -518,15 +501,6 @@ void MosfetBase::evalIdsGmGds(
     double p = isP ? -1.0 : 1.0;
 
     // ========= 1. 先根据电压决定“有效的 D/S”方向 =========
-    //
-    // 等效偏置里我们用：
-    //   Vgs_eff = p * (Vg - Vs_eff)
-    //   Vds_eff = p * (Vd_eff - Vs_eff)
-    // 希望 Vds_eff >= 0，这样模型只需要处理一个象限。
-    //
-    // 对于 NMOS (p=+1)：希望 Vd_eff >= Vs_eff
-    // 对于 PMOS (p=-1)：希望 Vs_eff >= Vd_eff
-    // 统一写成：若 p*(Vd0 - Vs0) < 0 就交换 D/S
     double Vds_eff_A = p * (Vd0 - Vs0);
     bool swapped = (Vds_eff_A < 0.0);
 
@@ -585,23 +559,6 @@ void MosfetBase::evalIdsGmGds(
     double dId_dVgs_eff  = gm0  * factor;                  // ∂Ids_eff/∂Vgs_eff
 
     // ========= 3. 从“等效 NMOS + 有效 D/S”映射回“原网表 D/S” =========
-    //
-    // 记：
-    //   Ids_model_eff = p * Ids_eff
-    //
-    // 若没有交换（swapped == false）：
-    //   有效 D 就是原来的 D，直接：
-    //     Ids_out = Ids_model_eff
-    //     gm_out  = ∂Ids_out/∂Vg  = dId_dVgs_eff
-    //     gds_out = ∂Ids_out/∂Vd  = dId_dVds_eff
-    //
-    // 若交换了（有效 D 在原来的 S 端）：
-    //   原 D 端电流 = - Ids_model_eff
-    //   用链式法则可以推到：
-    //     gm_out  = - dId_dVgs_eff
-    //     gds_out =  dId_dVgs_eff + dId_dVds_eff
-    //   并且 ∂Ids/∂Vs = -gm_out - gds_out 仍然成立，
-    //   和 stampNonlinearConductance 里的公式兼容。
     if (!swapped) {
         Ids = p * Ids_eff;
         gm  = dId_dVgs_eff;
