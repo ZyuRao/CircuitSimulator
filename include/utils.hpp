@@ -43,7 +43,6 @@ inline double parseSpiceNumber(const std::string& token) {
         else                   factor = 1.0;
         return base * factor;
     } catch (...) {
-        // stod 不认，比如 "10k" 这种，从头开始找后缀
         std::size_t pos = std::string::npos;
         for (std::size_t i = 0; i < s.size(); ++i) {
             char c = s[i];

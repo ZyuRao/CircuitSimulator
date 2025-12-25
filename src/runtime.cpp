@@ -74,7 +74,7 @@ void initRuntimeOptions(RuntimeOptions& opts) {
     }
 }
 
-} // namespace
+}
 
 RuntimeOptions& runtimeOptions() {
     static RuntimeOptions opts;

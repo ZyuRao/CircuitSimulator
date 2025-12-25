@@ -31,12 +31,6 @@ namespace Solver {
     };
 
     // ================ 自写 LU 分解（Doolittle + 部分主元） =================
-    //
-    // A 被分解为 P * A = L * U
-    // 这里：LU 矩阵同时存 L、U：
-    //   - 下三角（含对角线下方）：L 的非对角元素（对角线隐含为 1）
-    //   - 上三角（含对角线）：U
-    // perm 记录行置换：b_perm[i] = b[perm[i]]
 
     //通用LU（部分主元，原地分解，非分块）
     template <typename MatrixType>
@@ -320,11 +314,6 @@ namespace Solver {
     }
 
     // ================ Gauss-Seidel 迭代法 =================
-    //
-    // 解 A x = b
-    // x0 为初值（可以用上一轮牛顿迭代的 x，当作 warm start）
-    // 遇到对角元接近 0 时，增加一个极小量进行正则化，避免直接失败。
-    // 返回最后一次迭代结果（不保证一定收敛）
     struct IterSolveInfo {
         VectorXd x;
         bool     converged = false;

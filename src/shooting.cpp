@@ -46,12 +46,7 @@ void stampDynamicMatrix(const Circuit& ckt, MatrixXd& B, double dt) {
         }
     }
 
-    // 2. 电感 (Branch equation contribution)
-    // 电感方程: vP - vM - (L/dt)*iL = ...
-    // 对 i_prev 的导数出现在 RHS，系数为 -(L/dt)
-    // 注意方程符号： Row k: vP - vM - R_eq * iL = ...
-    // 对应 RHS 项是 -R_eq * i_prev。
-    // 所以 B(k, k) 应该填入 -L/dt
+    // 2. 电感
     for (const auto& e : ckt.elements) {
         if (auto ind = std::dynamic_pointer_cast<Inductor>(e)) {
             double val = - (ind->getL() * invDt); 
@@ -62,7 +57,7 @@ void stampDynamicMatrix(const Circuit& ckt, MatrixXd& B, double dt) {
         }
     }
 
-    // 3. MOSFET 寄生电容 (近似为常数 Cg0, Cj0，与 pssStampCapBE 一致)
+    // 3. MOSFET 寄生电容
     for (const auto& e : ckt.elements) {
         if (auto m = std::dynamic_pointer_cast<MosfetBase>(e)) {
             const auto& nodes = m->getNodeIds();
@@ -140,7 +135,7 @@ struct MosCapState {
 static bool solveOneStepBE(const Circuit& ckt,
                            const SimulationConfig& sim,
                            double tNow, double dt,
-                           VectorXd& x, // in: x_n (as initial guess), out: x_{n+1}
+                           VectorXd& x,
                            const std::unordered_map<const CapacitorElement*, double>& capVprev,
                            const std::unordered_map<const Inductor*, double>& indIprev,
                            const std::unordered_map<const MosfetBase*, MosCapState>& mosPrev,
@@ -150,12 +145,11 @@ static bool solveOneStepBE(const Circuit& ckt,
     const int N = ckt.numUnknowns();
     const int maxNewtonIters = 50;
     const double tol = 1e-9;
-    const double damp = 1.0; // 不稳就改成 0.5~0.9
+    const double damp = 1.0;
 
     MatrixXd G(N, N);
     VectorXd I(N);
 
-    // gmin continuation inside one step
     const int maxGminTries = 6;
     double gmin = 1e-12;
 
@@ -169,9 +163,8 @@ static bool solveOneStepBE(const Circuit& ckt,
 
             AnalysisContext ctx;
             ctx.type = AnalysisType::TRAN;
-            ctx.time = tNow; // backward-euler at t_{n+1}
+            ctx.time = tNow;
 
-            // 1) static elements: R, independent sources, etc.
             for (const auto& e : ckt.elements) {
                 if (std::dynamic_pointer_cast<CapacitorElement>(e)) continue;
                 if (std::dynamic_pointer_cast<Inductor>(e)) continue;
@@ -179,14 +172,12 @@ static bool solveOneStepBE(const Circuit& ckt,
                 e->stamp(G, I, ckt, xk, ctx);
             }
 
-            // 2) MOS conduction (Newton linearization)
             for (const auto& e : ckt.elements) {
                 auto m = std::dynamic_pointer_cast<MosfetBase>(e);
                 if (!m) continue;
                 m->stamp(G, I, ckt, xk, ctx);
             }
 
-            // 3) BE dynamic stamps (caps / inductors / MOS caps) using HISTORY from x_n
             for (const auto& e : ckt.elements) {
                 if (auto c = std::dynamic_pointer_cast<CapacitorElement>(e)) {
                     const auto& nodes = c->getNodeIds();
@@ -222,7 +213,6 @@ static bool solveOneStepBE(const Circuit& ckt,
 
             stampGlobalGmin(ckt, G, gmin);
 
-            // Solve the linearized system
             VectorXd xsol = Solver::solveLinearSystemLU(G, I);
             if (!xsol.allFinite()) {
                 converged = false;
@@ -240,7 +230,6 @@ static bool solveOneStepBE(const Circuit& ckt,
         }
 
         if (converged) {
-            // Re-stamp one more time at the final x to get accurate Jacobian A
             G.setZero();
             I.setZero();
 
@@ -379,9 +368,8 @@ static bool solveOneStepTR(const Circuit& ckt,
 
             AnalysisContext ctx;
             ctx.type = AnalysisType::TRAN;
-            ctx.time = tNow; // at t_{n+1}
+            ctx.time = tNow;
 
-            // 1) static elements
             for (const auto& e : ckt.elements) {
                 if (std::dynamic_pointer_cast<CapacitorElement>(e)) continue;
                 if (std::dynamic_pointer_cast<Inductor>(e)) continue;
@@ -389,14 +377,12 @@ static bool solveOneStepTR(const Circuit& ckt,
                 e->stamp(G, I, ckt, xk, ctx);
             }
 
-            // 2) MOS conduction
             for (const auto& e : ckt.elements) {
                 auto m = std::dynamic_pointer_cast<MosfetBase>(e);
                 if (!m) continue;
                 m->stamp(G, I, ckt, xk, ctx);
             }
 
-            // 3) TR dynamic stamps (caps / inductors / MOS caps) using HISTORY from step n
             for (const auto& e : ckt.elements) {
                 if (auto c = std::dynamic_pointer_cast<CapacitorElement>(e)) {
                     const auto& nodes = c->getNodeIds();
@@ -453,7 +439,6 @@ static bool solveOneStepTR(const Circuit& ckt,
         }
 
         if (converged) {
-            // Re-stamp at final xk to output accurate A
             G.setZero(); I.setZero();
 
             AnalysisContext ctx;
@@ -581,7 +566,6 @@ VectorXd integrateOnePeriodPssTR(const Circuit& ckt,
         mosPrev[m.get()] = st;
     }
 
-    // -------- sensitivity init --------
     MatrixXd S;
     std::unordered_map<const CapacitorElement*, RowVectorXd> capIsens;
     std::unordered_map<const MosfetBase*, std::array<RowVectorXd, 4>> mosIsens; // [igs, igd, isb, idb]
@@ -612,7 +596,6 @@ VectorXd integrateOnePeriodPssTR(const Circuit& ckt,
         const double dtTry = std::min(dt, T - t);
         const double tNext = t + dtTry;
 
-        // ---- 1) solve x_{n+1} and get A ----
         MatrixXd A(N, N);
         VectorXd xGuess = x;
         bool ok = solveOneStepTR(ckt, sim, tNext, dtTry, xGuess,
@@ -622,12 +605,10 @@ VectorXd integrateOnePeriodPssTR(const Circuit& ckt,
         }
         VectorXd xNew = xGuess;
 
-        // ---- 2) propagate sensitivity: A * S_{n+1} = d(RHS)/dx0 ----
         if (outMonodromy) {
             MatrixXd Sold = S;
             MatrixXd RHSsens = MatrixXd::Zero(N, N);
 
-            // capacitors
             for (auto& c : caps) {
                 const auto& nodes = c->getNodeIds();
                 const int eq1 = ckt.nodes[nodes[0]].eqIndex;
@@ -641,12 +622,11 @@ VectorXd integrateOnePeriodPssTR(const Circuit& ckt,
 
                 const RowVectorXd& diPrev = capIsens.at(c.get());
 
-                RowVectorXd contrib = Gc * dvPrev + diPrev; // d(rhs_eq1)
+                RowVectorXd contrib = Gc * dvPrev + diPrev;
                 if (eq1 >= 0) RHSsens.row(eq1) += contrib;
                 if (eq2 >= 0) RHSsens.row(eq2) -= contrib;
             }
 
-            // inductors
             for (auto& L : inds) {
                 const auto& nodes = L->getNodeIds();
                 const int eqP = ckt.nodes[nodes[0]].eqIndex;
@@ -660,12 +640,11 @@ VectorXd integrateOnePeriodPssTR(const Circuit& ckt,
                 if (eqP >= 0) dvPrev += Sold.row(eqP);
                 if (eqM >= 0) dvPrev -= Sold.row(eqM);
 
-                const RowVectorXd diPrev = Sold.row(k); // iPrev is x_n(k)
+                const RowVectorXd diPrev = Sold.row(k);
 
                 RHSsens.row(k) += -(R * diPrev + dvPrev);
             }
 
-            // MOS parasitic caps (Cgs, Cgd, Csb, Cdb)
             for (auto& m : mosfets) {
                 const auto& nodes = m->getNodeIds();
                 const int eqD = ckt.nodes[nodes[0]].eqIndex;
@@ -700,7 +679,6 @@ VectorXd integrateOnePeriodPssTR(const Circuit& ckt,
             Eigen::PartialPivLU<MatrixXd> lu(A);
             S = lu.solve(RHSsens);
 
-            // ---- 3) update current-history sensitivities (capIsens / mosIsens) ----
             for (auto& c : caps) {
                 const auto& nodes = c->getNodeIds();
                 const int eq1 = ckt.nodes[nodes[0]].eqIndex;
@@ -756,7 +734,6 @@ VectorXd integrateOnePeriodPssTR(const Circuit& ckt,
             }
         }
 
-        // ---- 4) update scalar histories using xNew ----
         for (auto& c : caps) {
             const auto& nodes = c->getNodeIds();
             const int eq1 = ckt.nodes[nodes[0]].eqIndex;
@@ -801,7 +778,6 @@ VectorXd integrateOnePeriodPssTR(const Circuit& ckt,
             const double Cj0 = m->getCj0();
             const double Cg0 = m->getCg0();
 
-            // update currents with TR recurrence: iNew = Gc*(vNew - vPrev) - iPrev
             if (Cg0 > 0.0) {
                 const double Gc = 2.0 * Cg0 / dtTry;
                 st.igsPrev = Gc * (vgsNew - st.vgsPrev) - st.igsPrev;
@@ -846,7 +822,6 @@ VectorXd integrateOnePeriodPssBE(const Circuit& ckt,
     const int N = ckt.numUnknowns();
     VectorXd x = x0;
 
-    // Collect element lists and init history from x0
     std::vector<std::shared_ptr<CapacitorElement>> caps;
     std::vector<std::shared_ptr<Inductor>> inds;
     std::vector<std::shared_ptr<MosfetBase>> mosfets;
@@ -899,7 +874,6 @@ VectorXd integrateOnePeriodPssBE(const Circuit& ckt,
         const double dtTry = std::min(dt, T - t);
         const double tNext = t + dtTry;
 
-        // 1) Solve x_{n+1} and get step Jacobian A
         MatrixXd A(N, N);
         VectorXd xGuess = x;
         bool ok = solveOneStepBE(ckt, sim, tNext, dtTry, xGuess, capVprev, indIprev, mosPrev, A);
@@ -908,15 +882,13 @@ VectorXd integrateOnePeriodPssBE(const Circuit& ckt,
         }
         x = xGuess;
 
-        // 2) Sensitivity recursion:  A * S_{n+1} = B * S_n
         if (outMonodromy) {
             MatrixXd B = MatrixXd::Zero(N, N);
             stampDynamicMatrix(ckt, B, dtTry);
 
             MatrixXd RHS = B * S;
 
-            // Factorize A once and solve for all RHS columns
-            MatrixXd LU = A;                 // 你的 LU 是 in-place 的，所以要拷贝一份
+            MatrixXd LU = A;
             std::vector<int> perm;
             perm.reserve(N);
 
@@ -931,7 +903,6 @@ VectorXd integrateOnePeriodPssBE(const Circuit& ckt,
             }
         }
 
-        // 3) Update history using x (as x_n for next step)
         for (auto& c : caps) {
             const auto& nodes = c->getNodeIds();
             capVprev[c.get()] = getNodeVoltage(ckt, x, nodes[0]) - getNodeVoltage(ckt, x, nodes[1]);
@@ -978,7 +949,6 @@ void runPssShootingAnalysis(const Circuit& ckt,
     const int N = ckt.numUnknowns();
     if (N <= 0) return;
 
-    // 1) DC init
     DcAnalysis dc(ckt, sim, DcSolverKind::GaussSeidel);
     VectorXd xInit = dc.run();
     if (sim.verbose) {
@@ -990,7 +960,6 @@ void runPssShootingAnalysis(const Circuit& ckt,
     const int maxIters = std::max(1, cfg.maxIters);
     const double tol = std::max(1e-14, cfg.tol);
 
-    // Outer Newton on H(x0) = x(T;x0) - x0
     for (int it = 0; it < maxIters; ++it) {
         MatrixXd M(N, N);
         VectorXd xT = integrateOnePeriodPssTR(ckt, sim, dt, T, xInit, &M, nullptr);
@@ -1006,19 +975,16 @@ void runPssShootingAnalysis(const Circuit& ckt,
         }
         MatrixXd J = M - MatrixXd::Identity(N, N);
 
-        // Solve J * dx = -H
         VectorXd dx = Solver::solveLinearSystemLU(J, -H);
         if (!dx.allFinite()) {
             throw std::runtime_error("PSS shooting: linear solve failed (Jacobian singular/NaN)");
         }
-
-        // Damping + backtracking (robust)
         double alpha = (cfg.relax > 0.0 && cfg.relax <= 1.0) ? cfg.relax : 1.0;
         bool accepted = false;
 
         for (int ls = 0; ls < 8; ++ls) {
             VectorXd xTrial = xInit + alpha * dx;
-            VectorXd xT_trial = integrateOnePeriodPssBE(ckt, sim, dt, T, xTrial, nullptr, nullptr);
+            VectorXd xT_trial = integrateOnePeriodPssTR(ckt, sim, dt, T, xTrial, nullptr, nullptr);
             VectorXd H_trial = xT_trial - xTrial;
             double n_trial = H_trial.norm();
 
@@ -1031,19 +997,16 @@ void runPssShootingAnalysis(const Circuit& ckt,
         }
 
         if (!accepted) {
-            xInit += 1e-2 * dx; // fallback
+            xInit += 1e-2 * dx;
         }
     }
 
-    // 2) Output one-period waveform
     std::ofstream ofs(outFile);
     if (!ofs) {
         std::cerr << "Cannot open output file: " << outFile << "\n";
         return;
     }
     ofs << std::setprecision(12);
-
-    // Header: time, node voltages, then branch currents (V sources + L)
     ofs << "time";
     for (const auto& node : ckt.nodes) {
         if (node.eqIndex >= 0) ofs << ",V(" << node.name << ")";
@@ -1077,7 +1040,7 @@ void runPssShootingAnalysis(const Circuit& ckt,
     };
 
     dumpRow(0.0, xInit);
-    integrateOnePeriodPssBE(ckt, sim, dt, T, xInit, nullptr, dumpRow);
+    integrateOnePeriodPssTR(ckt, sim, dt, T, xInit, nullptr, dumpRow);
 
     std::cout << "PSS waveform written to: " << outFile << "\n";
 }

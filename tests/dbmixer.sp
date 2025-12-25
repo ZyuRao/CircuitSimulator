@@ -55,5 +55,5 @@ Rs2 113 111 25
 *.probe hb V(102) V(103) 
 .probe hb V(102) V(103) V(107)
 .probe tran V(102) V(103)
-.probe pss V(102) V(103)
+.probe pss V(102) V(103) V(107)
 .end
